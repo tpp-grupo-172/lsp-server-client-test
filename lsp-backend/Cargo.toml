@@ -9,3 +9,4 @@ serde_json = "1.0.132"
 tokio = { version = "1.41.0", features = ["full"] }
 tracing-subscriber = "0.3.18"
 tower-lsp = "0.20.0"
+tree-sitter-test = { path = "../../tree-sitter-test" }

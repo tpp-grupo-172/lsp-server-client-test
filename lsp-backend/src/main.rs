@@ -1,6 +1,9 @@
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+use std::path::Path;
+use tree_sitter_test::run_analysis;
+
 
 #[derive(Debug)]
 struct Backend {
@@ -32,14 +35,24 @@ impl LanguageServer for Backend {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-      if let Some(file_saved) = params.text_document.uri.path().split('/').last() {
-        let message = format!("Saved file {:?} !", file_saved);
-        self.client.show_message(MessageType::INFO, message).await;
-      } else {
-        eprint!("Error saving file");
-        self.client.show_message(MessageType::ERROR, "Error saving file!").await;
+      let uri = params.text_document.uri;
+      let path = uri.to_file_path().unwrap_or_default();
+
+      if !path.exists() {
+          self.client.show_message(MessageType::ERROR, "File not found").await;
+          return;
       }
-    }
+
+      match run_analysis(Path::new(&path)) {
+          Ok(json) => {
+              self.client.show_message(MessageType::INFO, format!("Analysis complete")).await;
+              self.client.log_message(MessageType::INFO, json).await;
+          }
+          Err(err) => {
+              self.client.show_message(MessageType::ERROR, format!("Analyzer failed: {}", err)).await;
+          }
+      }
+  }
 
 }
 
