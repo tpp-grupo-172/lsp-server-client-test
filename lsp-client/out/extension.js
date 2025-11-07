@@ -40,7 +40,6 @@ const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
 let client;
 function activate(context) {
-    // Ruta al ejecutable del servidor LSP compilado
     const serverPath = context.asAbsolutePath(path.join("..", "lsp-backend", "target", "debug", "lsp-backend"));
     const serverOptions = {
         run: { command: serverPath, transport: node_1.TransportKind.stdio },
@@ -50,16 +49,18 @@ function activate(context) {
     const clientOptions = {
         documentSelector: [{ scheme: "file", language: "plaintext" }],
         synchronize: {
-            // Notificar al servidor cuando se guarden archivos
             fileEvents: vscode.workspace.createFileSystemWatcher("**/*.*")
         },
         outputChannel,
         traceOutputChannel: vscode.window.createOutputChannel("LSP Trace")
     };
     client = new node_1.LanguageClient("myLspServer", "My LSP Server", serverOptions, clientOptions);
-    // Inicia el cliente → inicia el servidor LSP
     client.start();
-    vscode.window.showInformationMessage("My LSP extension is active!");
+    client.onNotification("lsp-server/customJson", (data) => {
+        console.log("Recibido del LSP:", data);
+        vscode.window.showInformationMessage(`${data.title} - ${data.summary}`);
+    });
+    vscode.window.showInformationMessage("LSP extension active!");
 }
 function deactivate() {
     if (!client) {

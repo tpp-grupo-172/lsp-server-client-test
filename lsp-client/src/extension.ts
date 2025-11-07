@@ -38,8 +38,18 @@ export function activate(context: vscode.ExtensionContext) {
 
   client.start();
 
+  client.onNotification("lsp-server/customJson", (data) => {
+    console.log("Recibido del LSP:", data);
+
+    vscode.window.showInformationMessage(
+      `${data.title} - ${data.summary}`
+    );
+  });
+
   vscode.window.showInformationMessage("LSP extension active!");
 }
+
+
 
 export function deactivate(): Thenable<void> | undefined {
   if (!client) {
