@@ -67,7 +67,7 @@ function activate(context) {
         const htmlPath = vscode.Uri.joinPath(context.extensionUri, "dist", "index.html");
         const htmlFile = await vscode.workspace.fs.readFile(htmlPath);
         let html = htmlFile.toString();
-        // Corrige las rutas a recursos (CSS/JS) para el Webview
+        // correccion de las rutas a recursos (CSS/JS)
         const baseUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, "dist"));
         html = html.replace(/\/assets\//g, `${baseUri.toString()}/assets/`);
         panel.webview.html = html;
