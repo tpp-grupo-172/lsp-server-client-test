@@ -1,5 +1,7 @@
 use tower_lsp::jsonrpc::Result;
+use serde::{Serialize, Deserialize};
 use tower_lsp::lsp_types::*;
+use tower_lsp::lsp_types::notification::Notification;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use std::path::Path;
 use tree_sitter_test::run_analysis;
@@ -8,6 +10,18 @@ use tree_sitter_test::run_analysis;
 #[derive(Debug)]
 struct Backend {
     client: Client,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CustomData {
+    title: String,
+    summary: String,
+}
+struct CustomJsonNotification;
+
+impl Notification for CustomJsonNotification {
+    type Params = CustomData;
+    const METHOD: &'static str = "lsp-server/customJson";
 }
 
 #[tower_lsp::async_trait]
@@ -52,6 +66,12 @@ impl LanguageServer for Backend {
               self.client.show_message(MessageType::ERROR, format!("Analyzer failed: {}", err)).await;
           }
       }
+      let data = CustomData {
+        title: "Respuesta Custom".into(),
+        summary: "Summary de la respuesta".into()
+      };
+
+      self.client.send_notification::<CustomJsonNotification>(data).await;
   }
 
 }
