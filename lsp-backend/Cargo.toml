@@ -10,3 +10,5 @@ tokio = { version = "1.41.0", features = ["full"] }
 tracing-subscriber = "0.3.18"
 tower-lsp = "0.20.0"
 tree-sitter-test = { path = "../../tree-sitter-test" }
+blake3 = "1"
+chrono = { version = "0.4", features = ["clock"] }
