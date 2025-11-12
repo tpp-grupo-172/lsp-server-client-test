@@ -24,7 +24,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('message', (event) => {
     const message = event.data;
     switch (message.command) {
-      case 'lsp-server/customJson':
+      case 'lsp-server/processedJson':
         lspData.set({ files: message.files });
         break;
     }

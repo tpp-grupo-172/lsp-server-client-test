@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import cytoscape, { type Core } from "cytoscape";
-  import { graphData } from "./lib/data";
+  import cytoscape, { type Core } from "cytoscape";  
   import { lspData, sendMessage } from "./lib/vscode";
 
   import type {
@@ -75,7 +74,18 @@
             "target-arrow-shape": "triangle",
             "curve-style": "bezier"
           }
+        },
+        {
+          selector: "edge[type='call']",
+          style: {
+            "line-color": "#4caf50",
+            "target-arrow-color": "#4caf50",
+            "target-arrow-shape": "triangle",
+            "width": 2,
+            "curve-style": "bezier"
+          }
         }
+
       ],
       layout: { name: "cose", padding: 20 }
     });
@@ -154,6 +164,90 @@
       });
     });
 
+
+    project.files.forEach((graph: DependencyGraph) => {
+      const filePath = graph.file_name;
+
+      graph.functions.forEach((fn) => {
+        const callerId = `${filePath}::${fn.name}`;
+      
+        if (fn.function_calls && fn.function_calls.length > 0) {
+          fn.function_calls.forEach((calledName) => {
+            
+            const possibleTargets = cy.nodes().filter((n) => {
+              const nodeType = n.data("type") as NodeType;
+              const nodeId = n.id();
+              
+              if (nodeType === "function") {
+                return nodeId.endsWith(`::${calledName}`);
+              }
+              if (nodeType === "method") {
+                return nodeId.endsWith(`.${calledName}`);
+              }
+              return false;
+            });
+            
+            possibleTargets.forEach(t => console.log(`      → ${t.id()}`));
+            
+            if (possibleTargets.length > 0) {
+              possibleTargets.forEach((target) => {
+                cy.add({
+                  data: {
+                    source: callerId,
+                    target: target.id(),
+                    type: "call"
+                  }
+                });
+              });
+            } else {
+              console.warn(
+                ` No se encontró '${calledName}' llamada desde '${callerId}'`
+              );
+            }
+          });
+        }
+      });
+
+      graph.classes.forEach((cls) => {
+        cls.methods.forEach((method) => {
+          const callerId = `${filePath}::${cls.name}.${method.name}`;
+          
+          if (method.function_calls && method.function_calls.length > 0) {
+            method.function_calls.forEach((calledName) => {
+              const possibleTargets = cy.nodes().filter((n) => {
+                const nodeType = n.data("type") as NodeType;
+                const nodeId = n.id();
+                
+                if (nodeType === "function") {
+                  return nodeId.endsWith(`::${calledName}`);
+                }
+                if (nodeType === "method") {
+                  return nodeId.endsWith(`.${calledName}`);
+                }
+                return false;
+              });
+              
+              if (possibleTargets.length > 0) {
+                possibleTargets.forEach((target) => {
+                  cy.add({
+                    data: {
+                      source: callerId,
+                      target: target.id(),
+                      type: "call"
+                    }
+                  });
+                });
+              } else {
+                console.warn(
+                  ` No se encontró '${calledName}' llamada desde '${callerId}'`
+                );
+              }
+            });
+          }
+        });
+      });
+    });
+
     cy.layout({ name: "cose", padding: 30 }).run();
 
     cy.on("tap", "node", (event) => {
@@ -179,7 +273,7 @@
 
   onMount(() => {
     sendMessage("requestData");
-    setTimeout(() => renderGraph(graphData), 0);
+    //setTimeout(() => renderGraph(graphData), 0);
   });
 
   function closePanel() {
@@ -189,6 +283,7 @@
 
   $: if ($lspData) {
     console.log("LSP data actualizado:", $lspData);
+    renderGraph($lspData)
   }
 </script>
 

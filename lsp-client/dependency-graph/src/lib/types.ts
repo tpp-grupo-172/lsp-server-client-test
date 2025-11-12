@@ -8,6 +8,7 @@ export interface FunctionDef {
   name: string;
   parameters: Parameter[];
   return_type: string | null;
+  function_calls: string[]
 }
 
 export interface Method extends FunctionDef {}
