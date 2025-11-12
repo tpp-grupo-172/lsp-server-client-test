@@ -22,3 +22,18 @@ export interface DependencyGraph {
   functions: FunctionDef[];
   classes: ClassDef[];
 }
+
+export type NodeType = "class" | "method" | "function" | "import";
+
+export interface NodeInfo {
+  parameters?: Parameter[];
+  return_type?: string | null;
+  methods?: Method[];
+}
+
+export interface SelectedNode {
+  id: string;
+  label: string;
+  type: NodeType;
+  info: NodeInfo | null;
+}
