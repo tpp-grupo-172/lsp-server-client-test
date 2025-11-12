@@ -27,7 +27,7 @@ Se comunica con el LSP backend utilizando el protocolo LSP, enviando y recibiend
 ### Interfaz Visual
 Muestra los resultados del análisis como un grafo interactivo. Permite navegar visualmente las dependencias, resaltar nodos, explorar relaciones y obtener información contextual sobre cada elemento del código.
 
-Tecnologías: `Svelte`, `TypeScript`, `Vite`, `LanguageClient`, D3.js, Cytoscape.js, Graphology.
+Tecnologías: `Svelte`, `TypeScript`, `Vite`, `LanguageClient`, `Cytoscape.js`.
 
 # Como funciona
 

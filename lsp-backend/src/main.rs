@@ -191,6 +191,13 @@ impl LanguageServer for Backend {
                 // 2) Actualizamos el store en memoria
                 self.upsert_store_value(&path, &value).await;
 
+                {
+                  let map = self.store.read().await;
+                  eprintln!("{:#?}", *map);
+                  // TODO: mandar map con la linea comentada de abajo + modificar CustomJsonNotification para que se adapte a lo que sea necesario mandar
+                  //self.client.send_notification::<CustomJsonNotification>(map).await;
+                }
+
                 // 3) Persistimos a disco (manejo de error no fatal)
                 match self.persist_analysis_json(&path, &value).await {
                     Ok(written) => {
