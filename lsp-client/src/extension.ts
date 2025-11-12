@@ -9,7 +9,7 @@ import {
 
 let client: LanguageClient;
 
-
+let files: any;
 export function activate(context: vscode.ExtensionContext) {
   const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development;
   const serverPath = context.asAbsolutePath(
@@ -47,13 +47,12 @@ export function activate(context: vscode.ExtensionContext) {
     if (isDevelopment) {
       console.log("Recibido del LSP:", data);
     }
-
+    files = data.files;
     data.files.forEach(file => {
       vscode.window.showInformationMessage(
         `${file.file_name}`
       );
     });
-
   });
 
   const modeMsg = isDevelopment ? "LSP extension active! (Development Mode)" : "LSP extension active!";
@@ -89,31 +88,21 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
   panel.webview.html = html;
-
+  
   panel.webview.onDidReceiveMessage(
     message => {
       console.log('Message from webview:', message);
       if (message.command === 'requestData') {
         panel.webview.postMessage({
-          command: 'dataResponse',
-          data: { nodes: [], edges: [] }
+          command: 'lsp-server/processedJson',
+          files: files
         });
       }
     },
     undefined,
     context.subscriptions
-  );
+  )
 
-  // client.onNotification("lsp-server/customJson", (data) => {
-  //   if (isDevelopment) {
-  //     console.log("Recibido del LSP:", data);
-  //   }
-
-  //   panel.webview.postMessage({
-  //     command: 'lspData',
-  //     data: data
-  //   });
-  // });
 });
   context.subscriptions.push(disposable);
 }

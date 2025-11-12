@@ -8,6 +8,7 @@ export interface FunctionDef {
   name: string;
   parameters: Parameter[];
   return_type: string | null;
+  function_calls: string[]
 }
 
 export interface Method extends FunctionDef {}
@@ -21,9 +22,10 @@ export interface DependencyGraph {
   imports: string[];
   functions: FunctionDef[];
   classes: ClassDef[];
+  file_name: string;
 }
 
-export type NodeType = "class" | "method" | "function" | "import";
+export type NodeType = "class" | "method" | "function" | "import" | "file";
 
 export interface NodeInfo {
   parameters?: Parameter[];
@@ -36,4 +38,8 @@ export interface SelectedNode {
   label: string;
   type: NodeType;
   info: NodeInfo | null;
+}
+
+export interface ProjectGraph {
+  files: DependencyGraph[];
 }

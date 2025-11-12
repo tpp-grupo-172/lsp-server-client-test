@@ -1,22 +1,22 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import cytoscape, { type Core } from "cytoscape";
-  import { graphData } from "./lib/data";
-  import { lspData, sendMessage } from './lib/vscode';
+  import cytoscape, { type Core } from "cytoscape";  
+  import { lspData, sendMessage } from "./lib/vscode";
 
-  import type { 
-    DependencyGraph, 
-    SelectedNode, 
+  import type {
+    DependencyGraph,
+    ProjectGraph,
+    SelectedNode,
     NodeType,
-    NodeInfo 
+    NodeInfo
   } from "./lib/types";
-  
+
   let cy: Core;
   let container: HTMLElement;
   let selectedNode: SelectedNode | null = null;
   let showPanel = false;
 
-  function renderGraph(data: DependencyGraph) {
+  function renderGraph(project: ProjectGraph) {
     cy = cytoscape({
       container: container,
       style: [
@@ -25,6 +25,7 @@
           style: {
             "background-color": (ele) => {
               const type = ele.data("type") as NodeType;
+              if (type === "file") return "#333333";
               if (type === "class") return "#ff9800";
               if (type === "method") return "#ffcc80";
               if (type === "function") return "#4caf50";
@@ -33,9 +34,8 @@
             },
             shape: (ele) => {
               const type = ele.data("type") as NodeType;
-              if (type === "class") return "roundrectangle";
-              if (type === "method") return "roundrectangle";
-              if (type === "function") return "roundrectangle";
+              if (type === "file") return "roundrectangle";
+              if (["class", "method", "function"].includes(type)) return "roundrectangle";
               if (type === "import") return "tag";
               return "roundrectangle";
             },
@@ -43,15 +43,26 @@
             color: "white",
             "text-valign": "center",
             "text-halign": "center",
-            "font-size": 10,            
+            "font-size": 10,
             "font-family": "JetBrains Mono, monospace",
-            "font-weight": 500,            
-            "width": "label",
-            "padding": "20px",
-            "height": "label",
+            "font-weight": 500,
+            "padding": "15px",
             "border-width": 2,
             "border-color": "#ffffff20",
             "border-opacity": 0.3
+          }
+        },
+        {
+          selector: "node[type='file']",
+          style: {
+            "background-opacity": 0.1,
+            "border-width": 2,
+            "border-color": "#888",
+            "text-valign": "top",
+            "font-size": 12,
+            "color": "#bbb",
+            "padding": "30px",
+            "width": "fit-content"
           }
         },
         {
@@ -63,89 +74,196 @@
             "target-arrow-shape": "triangle",
             "curve-style": "bezier"
           }
+        },
+        {
+          selector: "edge[type='call']",
+          style: {
+            "line-color": "#4caf50",
+            "target-arrow-color": "#4caf50",
+            "target-arrow-shape": "triangle",
+            "width": 2,
+            "curve-style": "bezier"
+          }
         }
+
       ],
       layout: { name: "cose", padding: 20 }
     });
-
-    data.imports.forEach((imp) =>
-      cy.add({ 
-        data: { 
-          id: imp, 
-          label: imp, 
-          type: "import" as NodeType,
-          info: null
-        } 
-      })
-    );
-
-    data.classes.forEach((cls) => {
-      const classInfo: NodeInfo = {
-        methods: cls.methods
-      };
-      
-      cy.add({ 
-        data: { 
-          id: cls.name, 
-          label: cls.name, 
-          type: "class" as NodeType,
-          info: classInfo
-        } 
-      });
-      
-      cls.methods.forEach((m) => {
-        const id = `${cls.name}.${m.name}`;
-        const methodInfo: NodeInfo = {
-          parameters: m.parameters,
-          return_type: m.return_type
-        };
-        
-        cy.add({ 
-          data: { 
-            id, 
-            label: m.name, 
-            type: "method" as NodeType,
-            info: methodInfo
-          } 
-        });
-        cy.add({ data: { source: cls.name, target: id } });
-      });
-    });
-
-    data.functions.forEach((fn) => {
-      const funcInfo: NodeInfo = {
-        parameters: fn.parameters,
-        return_type: fn.return_type
-      };
-      
-      cy.add({ 
-        data: { 
-          id: fn.name, 
-          label: fn.name, 
-          type: "function" as NodeType,
-          info: funcInfo
-        } 
-      });
-    });
-
-    data.functions.forEach((fn) =>
-      cy.add({ data: { source: "import math", target: fn.name } })
-    );
     
-    cy.layout({ name: "cose" }).run();
+    project.files.forEach((graph: DependencyGraph) => {
+      const filePath = graph.file_name;
+      const fileName = filePath.split("/").pop() || filePath;
 
-    cy.on('tap', 'node', (event) => {
+      cy.add({
+        data: { id: filePath, label: fileName, type: "file" as NodeType }
+      });
+
+      graph.imports.forEach((imp) =>
+        cy.add({
+          data: {
+            id: `${filePath}::${imp}`,
+            label: imp,
+            type: "import" as NodeType,
+            parent: filePath,
+            info: null
+          }
+        })
+      );
+
+      graph.classes.forEach((cls) => {
+        const classId = `${filePath}::${cls.name}`;
+        const classInfo: NodeInfo = { methods: cls.methods };
+
+        cy.add({
+          data: {
+            id: classId,
+            label: cls.name,
+            type: "class" as NodeType,
+            parent: filePath,
+            info: classInfo
+          }
+        });
+
+        cls.methods.forEach((m) => {
+          const methodId = `${classId}.${m.name}`;
+          const methodInfo: NodeInfo = {
+            parameters: m.parameters,
+            return_type: m.return_type
+          };
+
+          cy.add({
+            data: {
+              id: methodId,
+              label: m.name,
+              type: "method" as NodeType,
+              parent: filePath,
+              info: methodInfo
+            }
+          });
+
+          cy.add({ data: { source: classId, target: methodId } });
+        });
+      });
+
+      graph.functions.forEach((fn) => {
+        const funcId = `${filePath}::${fn.name}`;
+        const funcInfo: NodeInfo = {
+          parameters: fn.parameters,
+          return_type: fn.return_type
+        };
+
+        cy.add({
+          data: {
+            id: funcId,
+            label: fn.name,
+            type: "function" as NodeType,
+            parent: filePath,
+            info: funcInfo
+          }
+        });
+      });
+    });
+
+
+    project.files.forEach((graph: DependencyGraph) => {
+      const filePath = graph.file_name;
+
+      graph.functions.forEach((fn) => {
+        const callerId = `${filePath}::${fn.name}`;
+      
+        if (fn.function_calls && fn.function_calls.length > 0) {
+          fn.function_calls.forEach((calledName) => {
+            
+            const possibleTargets = cy.nodes().filter((n) => {
+              const nodeType = n.data("type") as NodeType;
+              const nodeId = n.id();
+              
+              if (nodeType === "function") {
+                return nodeId.endsWith(`::${calledName}`);
+              }
+              if (nodeType === "method") {
+                return nodeId.endsWith(`.${calledName}`);
+              }
+              return false;
+            });
+            
+            possibleTargets.forEach(t => console.log(`      → ${t.id()}`));
+            
+            if (possibleTargets.length > 0) {
+              possibleTargets.forEach((target) => {
+                cy.add({
+                  data: {
+                    source: callerId,
+                    target: target.id(),
+                    type: "call"
+                  }
+                });
+              });
+            } else {
+              console.warn(
+                ` No se encontró '${calledName}' llamada desde '${callerId}'`
+              );
+            }
+          });
+        }
+      });
+
+      graph.classes.forEach((cls) => {
+        cls.methods.forEach((method) => {
+          const callerId = `${filePath}::${cls.name}.${method.name}`;
+          
+          if (method.function_calls && method.function_calls.length > 0) {
+            method.function_calls.forEach((calledName) => {
+              const possibleTargets = cy.nodes().filter((n) => {
+                const nodeType = n.data("type") as NodeType;
+                const nodeId = n.id();
+                
+                if (nodeType === "function") {
+                  return nodeId.endsWith(`::${calledName}`);
+                }
+                if (nodeType === "method") {
+                  return nodeId.endsWith(`.${calledName}`);
+                }
+                return false;
+              });
+              
+              if (possibleTargets.length > 0) {
+                possibleTargets.forEach((target) => {
+                  cy.add({
+                    data: {
+                      source: callerId,
+                      target: target.id(),
+                      type: "call"
+                    }
+                  });
+                });
+              } else {
+                console.warn(
+                  ` No se encontró '${calledName}' llamada desde '${callerId}'`
+                );
+              }
+            });
+          }
+        });
+      });
+    });
+
+    cy.layout({ name: "cose", padding: 30 }).run();
+
+    cy.on("tap", "node", (event) => {
       const node = event.target;
+      if (node.data("type") === "file") return;
+
       selectedNode = {
-        id: node.data('id') as string,
-        label: node.data('label') as string,
-        type: node.data('type') as NodeType,
-        info: node.data('info') as NodeInfo | null
+        id: node.data("id") as string,
+        label: node.data("label") as string,
+        type: node.data("type") as NodeType,
+        info: node.data("info") as NodeInfo | null
       };
       showPanel = true;
     });
 
-    cy.on('tap', (event) => {
+    cy.on("tap", (event) => {
       if (event.target === cy) {
         showPanel = false;
         selectedNode = null;
@@ -154,8 +272,8 @@
   }
 
   onMount(() => {
-    sendMessage('requestData');
-    setTimeout(() => renderGraph(graphData), 0);
+    sendMessage("requestData");
+    //setTimeout(() => renderGraph(graphData), 0);
   });
 
   function closePanel() {
@@ -164,7 +282,8 @@
   }
 
   $: if ($lspData) {
-    console.log('LSP data actualizado:', $lspData);    
+    console.log("LSP data actualizado:", $lspData);
+    renderGraph($lspData)
   }
 </script>
 
