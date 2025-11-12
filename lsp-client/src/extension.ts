@@ -43,14 +43,17 @@ export function activate(context: vscode.ExtensionContext) {
 
   client.start();
 
-  client.onNotification("lsp-server/customJson", (data) => {
+  client.onNotification("lsp-server/processedJson", (data: { files: any[]}) => {
     if (isDevelopment) {
       console.log("Recibido del LSP:", data);
     }
 
-    vscode.window.showInformationMessage(
-      `${data.title} - ${data.summary}`
-    );
+    data.files.forEach(file => {
+      vscode.window.showInformationMessage(
+        `${file.file_name}`
+      );
+    });
+
   });
 
   const modeMsg = isDevelopment ? "LSP extension active! (Development Mode)" : "LSP extension active!";
@@ -101,16 +104,16 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions
   );
 
-  client.onNotification("lsp-server/customJson", (data) => {
-    if (isDevelopment) {
-      console.log("Recibido del LSP:", data);
-    }
+  // client.onNotification("lsp-server/customJson", (data) => {
+  //   if (isDevelopment) {
+  //     console.log("Recibido del LSP:", data);
+  //   }
 
-    panel.webview.postMessage({
-      command: 'lspData',
-      data: data
-    });
-  });
+  //   panel.webview.postMessage({
+  //     command: 'lspData',
+  //     data: data
+  //   });
+  // });
 });
   context.subscriptions.push(disposable);
 }
