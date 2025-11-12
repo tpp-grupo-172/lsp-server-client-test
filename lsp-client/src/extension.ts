@@ -21,7 +21,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   const outputChannel = vscode.window.createOutputChannel("LSP Backend Logs");
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "plaintext" }],
+    documentSelector: [
+      { scheme: "file", language: "plaintext" }, 
+      { scheme: "file", language: "python" }
+    ],
     synchronize: {
       fileEvents: vscode.workspace.createFileSystemWatcher("**/*.*")
     },
