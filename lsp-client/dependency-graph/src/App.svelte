@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import cytoscape, { type Core } from "cytoscape";
   import { graphData } from "./lib/data";
+  import { lspData, sendMessage } from './lib/vscode';
+
   import type { 
     DependencyGraph, 
     SelectedNode, 
@@ -152,12 +154,17 @@
   }
 
   onMount(() => {
+    sendMessage('requestData');
     setTimeout(() => renderGraph(graphData), 0);
   });
 
   function closePanel() {
     showPanel = false;
     selectedNode = null;
+  }
+
+  $: if ($lspData) {
+    console.log('LSP data actualizado:', $lspData);    
   }
 </script>
 
@@ -174,7 +181,7 @@
     -moz-osx-font-smoothing: grayscale;
   }
  
-  code, pre, .param-name {
+  code, .param-name {
     font-family: 'JetBrains Mono', monospace;
     font-variant-ligatures: none; 
   }
@@ -288,7 +295,6 @@
     color: #fff;
   }
 </style>
-
 <div id="cy" bind:this={container}></div>
 
 {#if showPanel && selectedNode}
