@@ -9,13 +9,27 @@ use tree_sitter_test::run_analysis;
 use blake3; // Hash para los paths
 use std::borrow::Cow;
 use std::{collections::HashMap, path::{Path, PathBuf}};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockReadGuard};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use serde_json::Value;
 
 use tower_lsp::lsp_types::MessageType;
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct FunctionData {
+    name: String,
+    parameters: Vec<Value>,
+    return_type: Option<Value>,
+    function_calls: Vec<Value>,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct LspFileMessage {
+    file_name: String,
+    classes: Vec<Value>,
+    functions: Vec<FunctionData>,
+    imports: Vec<Value>,
+}
 
 #[derive(Debug)]
 struct Backend {
@@ -31,11 +45,16 @@ struct CustomData {
     title: String,
     summary: String,
 }
-struct CustomJsonNotification;
+struct ProcessedJson;
 
-impl Notification for CustomJsonNotification {
-    type Params = CustomData;
-    const METHOD: &'static str = "lsp-server/customJson";
+#[derive(Serialize, Debug, Deserialize)]
+struct ProcessedJsonPayload {
+    files: Vec<LspFileMessage>,
+}
+
+impl Notification for ProcessedJson {
+    type Params = ProcessedJsonPayload;
+    const METHOD: &'static str = "lsp-server/processedJson";
 }
 
 // Helpers para manejo de paths
@@ -104,6 +123,26 @@ fn wrap_with_metadata(original_path: &Path, raw: Value) -> Value {
 
 
 
+fn format_for_lsp_message(data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>) -> Vec<LspFileMessage> {
+    data.iter()
+        .filter_map(|(path, value)| {
+            // aseguramos que el Value tenga las keys esperadas
+            let classes = value.get("classes")?.clone();
+            let functions = value.get("functions")?.clone();
+            let imports = value.get("imports")?.clone();
+
+            // intentamos deserializar las funciones (podrían ser objetos)
+            let functions: Vec<FunctionData> = serde_json::from_value(functions).ok()?;
+
+            Some(LspFileMessage {
+                file_name: path.to_string_lossy().to_string(),
+                classes: classes.as_array().cloned().unwrap_or_default(),
+                functions,
+                imports: imports.as_array().cloned().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
 
 impl Backend {
     /// Guarda/actualiza el JSON analizado del archivo en el store en memoria.
@@ -193,9 +232,9 @@ impl LanguageServer for Backend {
 
                 {
                   let map = self.store.read().await;
-                  eprintln!("{:#?}", *map);
-                  // TODO: mandar map con la linea comentada de abajo + modificar CustomJsonNotification para que se adapte a lo que sea necesario mandar
-                  //self.client.send_notification::<CustomJsonNotification>(map).await;
+                  let message = format_for_lsp_message(map);
+                  eprintln!("{:?}", message);
+                  self.client.send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message }).await;
                 }
 
                 // 3) Persistimos a disco (manejo de error no fatal)
