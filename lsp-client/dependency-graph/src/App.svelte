@@ -29,11 +29,27 @@
               if (type === "import") return "#2196f3";
               return "#9e9e9e";
             },
+            shape: (ele) => {
+              const type = ele.data("type") as NodeType;
+              if (type === "class") return "roundrectangle";
+              if (type === "method") return "roundrectangle";
+              if (type === "function") return "roundrectangle";
+              if (type === "import") return "tag";
+              return "roundrectangle";
+            },
             label: "data(label)",
             color: "white",
             "text-valign": "center",
             "text-halign": "center",
-            "font-size": 10
+            "font-size": 10,            
+            "font-family": "JetBrains Mono, monospace",
+            "font-weight": 500,            
+            "width": "label",
+            "padding": "20px",
+            "height": "label",
+            "border-width": 2,
+            "border-color": "#ffffff20",
+            "border-opacity": 0.3
           }
         },
         {
@@ -146,13 +162,23 @@
 </script>
 
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap');
+
   :global(body, html) {
     margin: 0;
     padding: 0;
     width: 100%;
     height: 100%;
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
-  
+ 
+  code, pre, .param-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-ligatures: none; 
+  }
+
   #cy {
     width: 100vw;
     height: 100vh;
@@ -176,6 +202,7 @@
     z-index: 1000;
     transform: translateX(100%);
     transition: transform 0.3s ease;
+    font-family: 'Inter', sans-serif;
   }
 
   .info-panel.show {
@@ -249,6 +276,12 @@
     margin-bottom: 8px;
     border-radius: 4px;
   }
+  .param-detail code {
+    font-family: 'JetBrains Mono', monospace;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
 
   h2 {
     margin-top: 0;
@@ -268,21 +301,21 @@
     {#if selectedNode.info}
       {#if selectedNode.type === 'function' || selectedNode.type === 'method'}
         <div class="section">
-          <div class="section-title">Parameters</div>
+          <div class="section-title">Parametros</div>
           {#if selectedNode.info.parameters && selectedNode.info.parameters.length > 0}
             {#each selectedNode.info.parameters as param}
               <div class="param-item">
                 <div class="param-name">{param.name}</div>
                 {#if param.param_type}
-                  <div class="param-detail">Type: <code>{param.param_type}</code></div>
+                  <div class="param-detail">Tipo: <code>{param.param_type}</code></div>
                 {/if}
                 {#if param.default_value}
-                  <div class="param-detail">Default: <code>{param.default_value}</code></div>
+                  <div class="param-detail">Valor por defecto: <code>{param.default_value}</code></div>
                 {/if}
               </div>
             {/each}
           {:else}
-            <div style="color: #777;">No parameters</div>
+            <div style="color: #777;">No tiene parametros</div>
           {/if}
         </div>
 
@@ -296,13 +329,13 @@
 
       {#if selectedNode.type === 'class'}
         <div class="section">
-          <div class="section-title">Methods</div>
+          <div class="section-title">Metodos</div>
           {#if selectedNode.info.methods}
             {#each selectedNode.info.methods as method}
               <div class="method-item">
                 <strong>{method.name}</strong>
                 <div style="font-size: 12px; color: #aaa; margin-top: 4px;">
-                  {method.parameters.length} parameter(s)
+                  {method.parameters.length} parametro(s)
                 </div>
               </div>
             {/each}
