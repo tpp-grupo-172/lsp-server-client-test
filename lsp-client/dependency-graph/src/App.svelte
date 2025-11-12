@@ -1,47 +1,96 @@
 <script lang="ts">
-  import svelteLogo from './assets/svelte.svg'
-  import viteLogo from '/vite.svg'
-  import Counter from './lib/Counter.svelte'
+  import { onMount } from "svelte";
+  import cytoscape, { type Core } from "cytoscape";
+  import {graphData} from "./lib/data"
+  import type { DependencyGraph } from "./lib/types";
+  
+  let cy: Core;
+  let container: HTMLElement;
+
+  function renderGraph(data: DependencyGraph) {
+    cy = cytoscape({
+      container: container,
+      style: [
+        {
+          selector: "node",
+          style: {
+            "background-color": (ele) => {
+              const type = ele.data("type");
+              if (type === "class") return "#ff9800";
+              if (type === "method") return "#ffcc80";
+              if (type === "function") return "#4caf50";
+              if (type === "import") return "#2196f3";
+              return "#9e9e9e";
+            },
+            label: "data(label)",
+            color: "white",
+            "text-valign": "center",
+            "text-halign": "center",
+            "font-size": 10
+          }
+        },
+        {
+          selector: "edge",
+          style: {
+            width: 2,
+            "line-color": "#888",
+            "target-arrow-color": "#888",
+            "target-arrow-shape": "triangle",
+            "curve-style": "bezier"
+          }
+        }
+      ],
+      layout: { name: "cose", padding: 20 }
+    });
+
+    data.imports.forEach((imp) =>
+      cy.add({ data: { id: imp, label: imp, type: "import" } })
+    );
+
+    data.classes.forEach((cls) => {
+      cy.add({ data: { id: cls.name, label: cls.name, type: "class" } });
+      cls.methods.forEach((m) => {
+        const id = `${cls.name}.${m.name}`;
+        cy.add({ data: { id, label: m.name, type: "method" } });
+        cy.add({ data: { source: cls.name, target: id } });
+      });
+    });
+
+    data.functions.forEach((fn) => 
+      cy.add({ data: { id: fn.name, label: fn.name, type: "function" } })
+    );
+
+    data.functions.forEach((fn) =>
+      cy.add({ data: { source: "import math", target: fn.name } })
+    );
+    
+    cy.layout({ name: "cose" }).run();
+  }
+
+  onMount(() => {
+    renderGraph(graphData);    
+    setTimeout(() => {
+      if (cy) {
+        cy.resize();
+        cy.fit();
+      }
+    }, 100);
+  });
 </script>
 
-<main>
-  <div>
-    <a href="https://vite.dev" target="_blank" rel="noreferrer">
-      <img src={viteLogo} class="logo" alt="Vite Logo" />
-    </a>
-    <a href="https://svelte.dev" target="_blank" rel="noreferrer">
-      <img src={svelteLogo} class="logo svelte" alt="Svelte Logo" />
-    </a>
-  </div>
-  <h1>Vite + Svelte</h1>
-
-  <div class="card">
-    <Counter />
-  </div>
-
-  <p>
-    Check out <a href="https://github.com/sveltejs/kit#readme" target="_blank" rel="noreferrer">SvelteKit</a>, the official Svelte app framework powered by Vite!
-  </p>
-
-  <p class="read-the-docs">
-    Click on the Vite and Svelte logos to learn more
-  </p>
-</main>
-
 <style>
-  .logo {
-    height: 6em;
-    padding: 1.5em;
-    will-change: filter;
-    transition: filter 300ms;
+  :global(body, html) {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
   }
-  .logo:hover {
-    filter: drop-shadow(0 0 2em #646cffaa);
-  }
-  .logo.svelte:hover {
-    filter: drop-shadow(0 0 2em #ff3e00aa);
-  }
-  .read-the-docs {
-    color: #888;
+  
+  #cy {
+    width: 100vw;
+    height: 100vh;
+    background: #1e1e1e;    
   }
 </style>
+
+<div id="cy" bind:this={container}></div>
