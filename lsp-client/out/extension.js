@@ -64,6 +64,23 @@ function activate(context) {
         vscode.window.showInformationMessage(`${data.title} - ${data.summary}`);
     });
     vscode.window.showInformationMessage("LSP extension active!");
+    vscode.window.showInformationMessage("LSP extension active!");
+    const disposable = vscode.commands.registerCommand("myLspServer.showGraph", async () => {
+        const panel = vscode.window.createWebviewPanel("dependencyGraph", "Dependency Graph", vscode.ViewColumn.One, {
+            enableScripts: true,
+            localResourceRoots: [
+                vscode.Uri.joinPath(context.extensionUri, "dist")
+            ]
+        });
+        const htmlPath = vscode.Uri.joinPath(context.extensionUri, "dist", "index.html");
+        const htmlFile = await vscode.workspace.fs.readFile(htmlPath);
+        let html = htmlFile.toString();
+        // correccion de las rutas a recursos (CSS/JS)
+        const baseUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, "dist"));
+        html = html.replace(/\/assets\//g, `${baseUri.toString()}/assets/`);
+        panel.webview.html = html;
+    });
+    context.subscriptions.push(disposable);
 }
 function deactivate() {
     if (!client) {

@@ -1,0 +1,50 @@
+import type { DependencyGraph } from "./types";
+
+export const graphData: DependencyGraph = {
+  imports: ["import math"],
+  functions: [
+    {
+      name: "area_of_circle",
+      parameters: [{ name: "r", param_type: null, default_value: "0" }],
+      return_type: null
+    },
+    {
+      name: "hypotenuse",
+      parameters: [
+        { name: "a", param_type: "int", default_value: null },
+        { name: "b", param_type: "str", default_value: '"hola"' }
+      ],
+      return_type: null
+    },
+    {
+      name: "volume",
+      parameters: [
+        { name: "a", param_type: null, default_value: null },
+        { name: "b", param_type: "int", default_value: null },
+        { name: "c", param_type: "int", default_value: "0" },
+        { name: "d", param_type: null, default_value: "2" }
+      ],
+      return_type: null
+    }
+  ],
+  classes: [
+    {
+      name: "Geometry",
+      methods: [
+        {
+          name: "__init__",
+          parameters: [
+            { name: "self", param_type: null, default_value: null },
+            { name: "shape_name", param_type: "str", default_value: null }
+          ],
+          return_type: null
+        },
+        {
+          name: "describe",
+          parameters: [{ name: "self", param_type: null, default_value: null }],
+          return_type: null
+        }
+      ]
+    }
+  ]
+};

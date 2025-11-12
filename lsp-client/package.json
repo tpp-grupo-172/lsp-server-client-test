@@ -13,6 +13,12 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "commands": [
+        {
+          "command": "myLspServer.showGraph",
+          "title": "Show Dependency Graph"
+        }
+    ],
     "languages": [
       {
         "id": "plaintext",
@@ -26,7 +32,9 @@
     ]
   },
   "scripts": {
-    "compile": "tsc -p ./"
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
