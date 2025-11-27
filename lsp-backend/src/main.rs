@@ -21,14 +21,14 @@ struct FunctionData {
     name: String,
     parameters: Vec<Value>,
     return_type: Option<Value>,
-    function_calls: Vec<Value>,
+    function_calls: Vec<Value>, // Value = { "name": String, "import_name": Option<String>}
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct LspFileMessage {
     file_name: String,
     classes: Vec<Value>,
     functions: Vec<FunctionData>,
-    imports: Vec<Value>,
+    imports: Vec<Value>, // Value = { "name": String, "path": Option<String>}
 }
 
 #[derive(Debug)]
@@ -219,7 +219,12 @@ impl LanguageServer for Backend {
             return;
         }
 
-        match run_analysis(Path::new(&path)) {
+        let works_space_root_clone;
+        {
+          works_space_root_clone = self.workspace_root.read().await.clone();
+        }
+
+        match run_analysis(Path::new(&path), &[works_space_root_clone]) {
             Ok(json_str) => {
                 // 1) Parseamos a Value (si falla, guardamos algo neutro)
                 let value: serde_json::Value = match serde_json::from_str(&json_str) {
