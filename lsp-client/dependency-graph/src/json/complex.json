@@ -1,0 +1,49 @@
+{
+  "files": [
+    {
+      "file_name": "module1.py",
+      "imports": [],
+      "functions": [
+        {
+          "name": "procesar",
+          "parameters": ["x"],
+          "return_type": "int",
+          "function_calls": []
+        }
+      ],
+      "classes": []
+    },
+    {
+      "file_name": "module2.py",
+      "imports": [],
+      "functions": [
+        {
+          "name": "procesar",
+          "parameters": ["x"],
+          "return_type": "int",
+          "function_calls": []
+        }
+      ],
+      "classes": []
+    },
+    {
+      "file_name": "main.py",
+      "imports": [
+        { "name": "module1", "path": "module1.py" },
+        { "name": "module2", "path": "module2.py" }
+      ],
+      "functions": [
+        {
+          "name": "run",
+          "parameters": [],
+          "return_type": "void",
+          "function_calls": [
+            { "name": "procesar", "import_name": "module1" },
+            { "name": "procesar", "import_name": "module2" }
+          ]
+        }
+      ],
+      "classes": []
+    }
+  ]
+}

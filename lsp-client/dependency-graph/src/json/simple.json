@@ -1,0 +1,32 @@
+{
+  "files": [
+    {
+      "file_name": "simple.py",
+      "imports": [],
+      "functions": [
+        {
+          "name": "sumar",
+          "parameters": [{"default_value":"0", "name": "a", "param_type": "number"}],
+          "return_type": null,
+          "function_calls": []
+        },
+        {
+          "name": "restar",        
+          "parameters": [{"default_value":"0", "name": "a", "param_type": "number"}, {"default_value":"0", "name": "b", "param_type": "number"}],
+          "return_type": null,
+          "function_calls": []
+        },
+        {
+          "name": "main",
+          "parameters": [],
+          "return_type": null,
+          "function_calls": [
+            { "name": "sumar", "import_name": null },
+            { "name": "restar", "import_name": null }
+          ]
+        }
+      ],
+      "classes": []
+    }
+  ]
+}

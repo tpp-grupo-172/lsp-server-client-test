@@ -1,0 +1,39 @@
+{
+  "files": [
+    {
+      "file_name": "file1.py",
+      "imports": [],
+      "functions": [
+        {
+          "name": "sumar",
+          "parameters": ["a", "b"],
+          "return_type": "int",
+          "function_calls": []
+        }
+      ],
+      "classes": []
+    },
+    {
+      "file_name": "file2.py",
+      "imports": [
+        { "name": "file1", "path": "file1.py" }
+      ],
+      "functions": [],
+      "classes": [
+        {
+          "name": "Calculadora",
+          "methods": [
+            {
+              "name": "duplicar",
+              "parameters": ["x"],
+              "return_type": "int",
+              "function_calls": [
+                { "name": "sumar", "import_name": "file1" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
