@@ -14,7 +14,11 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use serde_json::Value;
 
-use tower_lsp::lsp_types::MessageType;
+use tower_lsp::lsp_types::{
+    Registration, RegistrationParams, DidChangeWatchedFilesRegistrationOptions,
+    FileSystemWatcher, WatchKind, GlobPattern, MessageType,
+    DidChangeWatchedFilesParams, FileChangeType,
+};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct FunctionData {
@@ -112,6 +116,26 @@ async fn write_json_atomic(target_json_path: &Path, json: &Value) -> std::io::Re
     fs::rename(&tmp_path, target_json_path).await
 }
 
+async fn register_fs_watchers(&self) {
+    let watchers = vec![
+        FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/*".to_string()),
+            kind: Some(WatchKind::CREATE | WatchKind::CHANGE | WatchKind::DELETE),
+        },
+    ];
+
+    let options = DidChangeWatchedFilesRegistrationOptions { watchers };
+    let reg = Registration {
+        id: "fs-watchers-1".to_string(),
+        method: "workspace/didChangeWatchedFiles".to_string(),
+        register_options: Some(serde_json::to_value(options).unwrap()),
+    };
+
+    let _ = self.client.register_capability(RegistrationParams {
+        registrations: vec![reg],
+    }).await;
+}
+
 fn wrap_with_metadata(original_path: &Path, raw: Value) -> Value {
     json!({
         "schema_version": 1,
@@ -121,7 +145,38 @@ fn wrap_with_metadata(original_path: &Path, raw: Value) -> Value {
     })
 }
 
+async fn process_path_change(&self, path: &std::path::Path, typ: FileChangeType) {
+    match typ {
+        FileChangeType::CREATED | FileChangeType::CHANGED => {
+            if let Ok(json_str) = run_analysis(path) {
+                let value: serde_json::Value =
+                    serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
+                self.upsert_store_value(path, &value).await;
 
+                // Notifica al cliente con el agregado de este archivo
+                let map = self.store.read().await;
+                let message = format_for_lsp_message(map);
+                self.client.send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message }).await;
+
+                // Persiste a disco (ignora error no fatal)
+                let _ = self.persist_analysis_json(path, &value).await;
+            }
+        }
+        FileChangeType::DELETED => {
+            // Opcional: borrar del store y del cache en disco
+            {
+                let mut guard = self.store.write().await;
+                guard.remove(path);
+            }
+            let root = { self.workspace_root.read().await.clone() };
+            let base = cache_root_for_workspace(&root);
+            let file_id = hash_path(path);
+            let target = base.join(format!("{file_id}.json"));
+            let _ = tokio::fs::remove_file(target).await;
+        }
+        _ => {}
+    }
+}
 
 fn format_for_lsp_message(data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>) -> Vec<LspFileMessage> {
     data.iter()
@@ -201,9 +256,8 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.client
-            .log_message(MessageType::INFO, "Server initialized!")
-            .await;
+        self.client.log_message(MessageType::INFO, "Server initialized!").await;
+        self.register_fs_watchers().await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -219,12 +273,7 @@ impl LanguageServer for Backend {
             return;
         }
 
-        let works_space_root_clone;
-        {
-          works_space_root_clone = self.workspace_root.read().await.clone();
-        }
-
-        match run_analysis(Path::new(&path), &[works_space_root_clone]) {
+        match run_analysis(&path) {
             Ok(json_str) => {
                 // 1) Parseamos a Value (si falla, guardamos algo neutro)
                 let value: serde_json::Value = match serde_json::from_str(&json_str) {
@@ -282,7 +331,14 @@ impl LanguageServer for Backend {
         }
     }
 
-
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        // Procesa en paralelo pero con límite si quieres controlar carga
+        let futures = params.changes.into_iter().filter_map(|e| {
+            let typ = e.typ;
+            e.uri.to_file_path().ok().map(move |p| self.process_path_change(&p, typ))
+        });
+        futures::future::join_all(futures).await;
+    }
   
 }
 
