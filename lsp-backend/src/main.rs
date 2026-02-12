@@ -8,6 +8,7 @@ use tree_sitter_test::run_analysis;
 
 use blake3; // Hash para los paths
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::{collections::HashMap, path::{Path, PathBuf}};
 use tokio::sync::{RwLock, RwLockReadGuard};
 use tokio::fs;
@@ -30,12 +31,19 @@ struct LspFileMessage {
     functions: Vec<FunctionData>,
     imports: Vec<Value>, // Value = { "name": String, "path": Option<String>}
 }
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Connections {
+    file_src: String,
+    file_use: String,
+    function: String,
+}
 
 #[derive(Debug)]
 struct Backend {
     client: Client,
     // Estado global: resultados por archivo (en memoria)
     store: RwLock<HashMap<PathBuf, Value>>,
+    connections: RwLock<Vec<Connections>>,
     // Raíz del workspace (la resolvemos en initialize)
     workspace_root: RwLock<PathBuf>,
 }
@@ -46,15 +54,26 @@ struct CustomData {
     summary: String,
 }
 struct ProcessedJson;
+struct ShowFilesToChange;
 
 #[derive(Serialize, Debug, Deserialize)]
 struct ProcessedJsonPayload {
     files: Vec<LspFileMessage>,
 }
 
+#[derive(Serialize, Debug, Deserialize)]
+struct ShowFilesToChangePayload {
+    files: Vec<String>,
+}
+
 impl Notification for ProcessedJson {
     type Params = ProcessedJsonPayload;
     const METHOD: &'static str = "lsp-server/processedJson";
+}
+
+impl Notification for ShowFilesToChange {
+    type Params = ShowFilesToChangePayload;
+    const METHOD: &'static str = "lsp-server/showFilesToChange";
 }
 
 // Helpers para manejo de paths
@@ -151,6 +170,124 @@ impl Backend {
         guard.insert(original_path.to_path_buf(), value.clone());
     }
 
+    async fn save_function_reference(&self, original_path: &Path, value: &Value) {
+        let binding = value.clone();
+        let path_string = original_path.to_str().unwrap().to_string();
+
+        {
+          let mut connections = self.connections.write().await;
+          connections.retain(|c| c.file_use != path_string);
+        }
+        let mut imports_hashmap: HashMap<String, String> = HashMap::new();
+        let imports = binding
+            .get("imports")
+            .and_then(|v| v.as_array())
+            .expect("functions no es un array");
+        for import in imports {
+            let name: &str = import
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<sin nombre>");
+            let path: &str = import
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<sin nombre>");
+
+            imports_hashmap.insert(name.to_string(), path.to_string());
+        }
+
+        let functions = binding
+            .get("functions")
+            .and_then(|v| v.as_array())
+            .expect("functions no es un array");
+
+        for func in functions {
+            let functions_calls = func
+                .get("function_calls")
+                .and_then(|v| v.as_array())
+                .expect("function_calls no es un array");
+
+            for functions_call in functions_calls {
+                let name = functions_call
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<sin nombre>");
+                let import_name = functions_call
+                    .get("import_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<sin nombre>");
+
+                let path = imports_hashmap.get(import_name).unwrap().clone();
+                let connection = Connections {
+                    file_src: path,
+                    file_use: path_string.clone(),
+                    function: name.to_string()
+                };
+
+                let mut guard = self.connections.write().await;
+                guard.push(connection);
+            }
+        }
+    }
+
+    async fn analyze_firm_changes(&self, original_path: &Path, value: &Value, old_version: HashMap<PathBuf, Value>) -> Vec<std::string::String> {
+      let mut functions_to_warn_user: Vec<String> = vec![];
+      let path_string = original_path.to_str().unwrap().to_string();
+      if let Some(element_on_old_version) = old_version.get(original_path) {
+        let old_functions = element_on_old_version
+              .get("functions")
+              .and_then(|v| v.as_array())
+              .expect("functions no es un array");
+        let new_functions = value
+              .get("functions")
+              .and_then(|v| v.as_array())
+              .expect("functions no es un array");
+  
+        let old_map: HashMap<_, _> = old_functions
+            .iter()
+            .filter_map(|f| {
+                Some((f["name"].as_str()?, f))
+            })
+            .collect();
+  
+        let new_map: HashMap<_, _> = new_functions
+            .iter()
+            .filter_map(|f| {
+                Some((f["name"].as_str()?, f))
+            })
+            .collect();
+  
+        for (name, new_fn) in &new_map {
+            if let Some(old_fn) = old_map.get(name) {
+                if old_fn["return_type"] != new_fn["return_type"] || old_fn["parameters"] != new_fn["parameters"] {
+                    functions_to_warn_user.push(name.to_string());
+                }
+            }
+        }
+  
+        for name in old_map.keys() {
+            if !new_map.contains_key(name) {
+              functions_to_warn_user.push(name.to_string());            
+            }
+        }
+      }
+      
+      let functions_set: HashSet<_> = functions_to_warn_user.iter().collect();
+
+      let connections = self.connections.read().await;
+
+      let affected_files: Vec<String> = connections
+          .iter()
+          .filter(|c| {
+              c.file_src == path_string &&
+              functions_set.contains(&c.function)
+          })
+          .map(|c| c.file_use.clone())
+          .collect();
+
+      affected_files
+    }
+
     /// Persiste el resultado (con metadatos) a `<workspace>/.lsp-analysis/files/<hash>.json`.
     async fn persist_analysis_json(&self, original_path: &Path, raw_json: &Value)
         -> std::io::Result<PathBuf>
@@ -226,20 +363,37 @@ impl LanguageServer for Backend {
 
         match run_analysis(Path::new(&path), &[works_space_root_clone]) {
             Ok(json_str) => {
+                eprintln!("STARTING");
                 // 1) Parseamos a Value (si falla, guardamos algo neutro)
                 let value: serde_json::Value = match serde_json::from_str(&json_str) {
                     Ok(v) => v,
                     Err(_) => serde_json::json!({ "raw": json_str }),
                 };
+                eprintln!("STARTING 2");
+
+                let old_version = {
+                    let read_guard = self.store.read().await;
+                    read_guard.clone()
+                };
+
+                eprintln!("STARTING 3");
 
                 // 2) Actualizamos el store en memoria
                 self.upsert_store_value(&path, &value).await;
+                self.save_function_reference(&path, &value).await;
+                let files_to_warn = self.analyze_firm_changes(&path, &value, old_version).await;
+
+                eprintln!("STARTING 4");
 
                 {
                   let map = self.store.read().await;
                   let message = format_for_lsp_message(map);
-                  eprintln!("{:?}", message);
+                  
                   self.client.send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message }).await;
+                  if files_to_warn.len() > 0 {
+                    eprintln!("sending changes");
+                    self.client.send_notification::<ShowFilesToChange>(ShowFilesToChangePayload { files: files_to_warn }).await;
+                  }
                 }
 
                 // 3) Persistimos a disco (manejo de error no fatal)
@@ -292,6 +446,7 @@ async fn main() {
 
   let (service, socket) = LspService::new(|client| Backend { client, 
     store: RwLock::new(HashMap::new()),
+    connections: RwLock::new(vec![]),
     workspace_root: RwLock::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
   });
       Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
