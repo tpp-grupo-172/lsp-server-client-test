@@ -15,6 +15,8 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use serde_json::Value;
 
+mod utils;
+
 use tower_lsp::lsp_types::MessageType;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -111,7 +113,6 @@ fn hash_path(path: &Path) -> String {
     hash.to_hex().to_string()
 }
 
-
 // Helpers de escritura atómica
 async fn write_json_atomic(target_json_path: &Path, json: &Value) -> std::io::Result<()> {
     let tmp_path = target_json_path.with_extension("json.tmp");
@@ -139,8 +140,6 @@ fn wrap_with_metadata(original_path: &Path, raw: Value) -> Value {
         "data": raw
     })
 }
-
-
 
 fn format_for_lsp_message(data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>) -> Vec<LspFileMessage> {
     data.iter()
@@ -230,64 +229,6 @@ impl Backend {
         }
     }
 
-    async fn analyze_firm_changes(&self, original_path: &Path, value: &Value, old_version: HashMap<PathBuf, Value>) -> Vec<std::string::String> {
-      let mut functions_to_warn_user: Vec<String> = vec![];
-      let path_string = original_path.to_str().unwrap().to_string();
-      if let Some(element_on_old_version) = old_version.get(original_path) {
-        let old_functions = element_on_old_version
-              .get("functions")
-              .and_then(|v| v.as_array())
-              .expect("functions no es un array");
-        let new_functions = value
-              .get("functions")
-              .and_then(|v| v.as_array())
-              .expect("functions no es un array");
-  
-        let old_map: HashMap<_, _> = old_functions
-            .iter()
-            .filter_map(|f| {
-                Some((f["name"].as_str()?, f))
-            })
-            .collect();
-  
-        let new_map: HashMap<_, _> = new_functions
-            .iter()
-            .filter_map(|f| {
-                Some((f["name"].as_str()?, f))
-            })
-            .collect();
-  
-        for (name, new_fn) in &new_map {
-            if let Some(old_fn) = old_map.get(name) {
-                if old_fn["return_type"] != new_fn["return_type"] || old_fn["parameters"] != new_fn["parameters"] {
-                    functions_to_warn_user.push(name.to_string());
-                }
-            }
-        }
-  
-        for name in old_map.keys() {
-            if !new_map.contains_key(name) {
-              functions_to_warn_user.push(name.to_string());            
-            }
-        }
-      }
-      
-      let functions_set: HashSet<_> = functions_to_warn_user.iter().collect();
-
-      let connections = self.connections.read().await;
-
-      let affected_files: Vec<String> = connections
-          .iter()
-          .filter(|c| {
-              c.file_src == path_string &&
-              functions_set.contains(&c.function)
-          })
-          .map(|c| c.file_use.clone())
-          .collect();
-
-      affected_files
-    }
-
     /// Persiste el resultado (con metadatos) a `<workspace>/.lsp-analysis/files/<hash>.json`.
     async fn persist_analysis_json(&self, original_path: &Path, raw_json: &Value)
         -> std::io::Result<PathBuf>
@@ -371,19 +312,21 @@ impl LanguageServer for Backend {
                 };
                 eprintln!("STARTING 2");
 
-                let old_version = {
+                let old_version: HashMap<PathBuf, Value> = {
                     let read_guard = self.store.read().await;
                     read_guard.clone()
                 };
 
-                eprintln!("STARTING 3");
+                let old_connections: Vec<Connections> = {
+                    let read_guard = self.connections.read().await;
+                    read_guard.clone()
+                };
 
                 // 2) Actualizamos el store en memoria
                 self.upsert_store_value(&path, &value).await;
                 self.save_function_reference(&path, &value).await;
-                let files_to_warn = self.analyze_firm_changes(&path, &value, old_version).await;
-
-                eprintln!("STARTING 4");
+                let changed_functions_firms: Vec<utils::FunctionChange> = utils::detect_function_changes(&path, &value, &old_version);
+                let files_to_warn = utils::affected_files_by_change(&changed_functions_firms, &old_connections, &path);
 
                 {
                   let map = self.store.read().await;
@@ -392,7 +335,11 @@ impl LanguageServer for Backend {
                   self.client.send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message }).await;
                   if files_to_warn.len() > 0 {
                     eprintln!("sending changes");
-                    self.client.send_notification::<ShowFilesToChange>(ShowFilesToChangePayload { files: files_to_warn }).await;
+                    for (_, files) in files_to_warn {
+                      if files.len() > 0 {
+                        self.client.send_notification::<ShowFilesToChange>(ShowFilesToChangePayload { files: files }).await;
+                      }
+                    }
                   }
                 }
 
@@ -435,9 +382,6 @@ impl LanguageServer for Backend {
             }
         }
     }
-
-
-  
 }
 
 #[tokio::main]
