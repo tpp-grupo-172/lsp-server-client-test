@@ -3,6 +3,7 @@
 	import GraphView from "$lib/GraphView.svelte";
 	import { GraphCache } from "$lib/GraphCache.js";
 
+	/** @type {GraphCache | null} */
 	let graphCache = $state(null);
 
 	onMount(() => {
@@ -12,7 +13,6 @@
 			const message = event.data;
 			if (message.command === "lsp-server/processedJson") {
 				console.log("Received data from VS Code:", message.files);
-				// We wrap it in the expected format (mockData had a 'files' array in an object, but our GraphCache accepts the whole object. Actually looking at GraphicCache it accepts the full object. Let's see GraphCache)
 				graphCache = new GraphCache({ files: message.files });
 			}
 		};
