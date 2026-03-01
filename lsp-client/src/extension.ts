@@ -24,7 +24,7 @@ export function activate(context: vscode.ExtensionContext) {
   const outputChannel = vscode.window.createOutputChannel("LSP Backend Logs");
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
-      { scheme: "file", language: "plaintext" }, 
+      { scheme: "file", language: "plaintext" },
       { scheme: "file", language: "python" }
     ],
     synchronize: {
@@ -43,7 +43,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   client.start();
 
-  client.onNotification("lsp-server/processedJson", (data: { files: any[]}) => {
+  client.onNotification("lsp-server/processedJson", (data: { files: any[] }) => {
     if (isDevelopment) {
       console.log("Recibido del LSP:", data);
     }
@@ -56,7 +56,7 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   const modeMsg = isDevelopment ? "LSP extension active! (Development Mode)" : "LSP extension active!";
-  vscode.window.showInformationMessage(modeMsg);        
+  vscode.window.showInformationMessage(modeMsg);
 
   const disposable = vscode.commands.registerCommand("myLspServer.showGraph", async () => {
     const panel = vscode.window.createWebviewPanel(
@@ -71,9 +71,9 @@ export function activate(context: vscode.ExtensionContext) {
       }
     );
 
-  let html: string;
+    let html: string;
 
-  if (!isDevelopment) {
+    if (isDevelopment) {
       html = getViteDevHtml();
       vscode.window.showInformationMessage("Cargando grafo desde servidor local (modo dev)");
     } else {
@@ -84,32 +84,34 @@ export function activate(context: vscode.ExtensionContext) {
       const baseUri = panel.webview.asWebviewUri(
         vscode.Uri.joinPath(context.extensionUri, "dist")
       );
-      html = html.replace(/\/assets\//g, `${baseUri.toString()}/assets/`);
+
+      // SvelteKit static adapter places assets in /assets/ if appDir: 'assets'
+      html = html.replace(/(href|src)="\/assets\//g, `$1="${baseUri.toString()}/assets/`);
     }
 
-  panel.webview.html = html;
-  
-  panel.webview.onDidReceiveMessage(
-    message => {
-      console.log('Message from webview:', message);
-      if (message.command === 'requestData') {
-        panel.webview.postMessage({
-          command: 'lsp-server/processedJson',
-          files: files
-        });
-      }
-    },
-    undefined,
-    context.subscriptions
-  )
+    panel.webview.html = html;
 
-});
+    panel.webview.onDidReceiveMessage(
+      message => {
+        console.log('Message from webview:', message);
+        if (message.command === 'requestData') {
+          panel.webview.postMessage({
+            command: 'lsp-server/processedJson',
+            files: files
+          });
+        }
+      },
+      undefined,
+      context.subscriptions
+    )
+
+  });
   context.subscriptions.push(disposable);
 }
 
 function getViteDevHtml(): string {
   const vitePort = 5173;
-  
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
