@@ -1,0 +1,3 @@
+cargo tree | grep tower-lsp
+├── tower-lsp v0.20.0
+│   ├── tower-lsp-macros v0.9.0 (proc-macro)
