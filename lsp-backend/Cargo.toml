@@ -12,3 +12,4 @@ tower-lsp = "0.20.0"
 tree-sitter-test = { path = "../../tree-sitter-test" }
 blake3 = "1"
 chrono = { version = "0.4", features = ["clock"] }
+futures = { version = "0.3" }
