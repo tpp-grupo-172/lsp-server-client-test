@@ -55,6 +55,24 @@ export function activate(context: vscode.ExtensionContext) {
     });
   });
 
+  client.onNotification("lsp-server/showFilesToChange", (data: { files: string[]}) => {
+    if (isDevelopment) {
+      console.log("Recibido del LSP:", data);
+    }
+    files = data.files;
+    vscode.window.showInformationMessage(
+      `Function was changes, make sure to modify any needed places`,
+      'Open files'
+    ).then(selection => {
+      if (selection === 'Open files') {
+        files.forEach((file: any) => {
+          vscode.workspace.openTextDocument(file)
+            .then(doc => vscode.window.showTextDocument(doc, { preview: false }))
+        })
+      }
+    });
+  });
+
   const modeMsg = isDevelopment ? "LSP extension active! (Development Mode)" : "LSP extension active!";
   vscode.window.showInformationMessage(modeMsg);
 

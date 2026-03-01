@@ -8,11 +8,14 @@ use tree_sitter_test::run_analysis;
 
 use blake3; // Hash para los paths
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::{collections::HashMap, path::{Path, PathBuf}};
 use tokio::sync::{RwLock, RwLockReadGuard};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use serde_json::Value;
+
+mod utils;
 
 use tower_lsp::lsp_types::MessageType;
 
@@ -30,12 +33,19 @@ struct LspFileMessage {
     functions: Vec<FunctionData>,
     imports: Vec<Value>, // Value = { "name": String, "path": Option<String>}
 }
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Connections {
+    file_src: String,
+    file_use: String,
+    function: String,
+}
 
 #[derive(Debug)]
 struct Backend {
     client: Client,
     // Estado global: resultados por archivo (en memoria)
     store: RwLock<HashMap<PathBuf, Value>>,
+    connections: RwLock<Vec<Connections>>,
     // Raíz del workspace (la resolvemos en initialize)
     workspace_root: RwLock<PathBuf>,
 }
@@ -46,15 +56,26 @@ struct CustomData {
     summary: String,
 }
 struct ProcessedJson;
+struct ShowFilesToChange;
 
 #[derive(Serialize, Debug, Deserialize)]
 struct ProcessedJsonPayload {
     files: Vec<LspFileMessage>,
 }
 
+#[derive(Serialize, Debug, Deserialize)]
+struct ShowFilesToChangePayload {
+    files: Vec<String>,
+}
+
 impl Notification for ProcessedJson {
     type Params = ProcessedJsonPayload;
     const METHOD: &'static str = "lsp-server/processedJson";
+}
+
+impl Notification for ShowFilesToChange {
+    type Params = ShowFilesToChangePayload;
+    const METHOD: &'static str = "lsp-server/showFilesToChange";
 }
 
 // Helpers para manejo de paths
@@ -92,7 +113,6 @@ fn hash_path(path: &Path) -> String {
     hash.to_hex().to_string()
 }
 
-
 // Helpers de escritura atómica
 async fn write_json_atomic(target_json_path: &Path, json: &Value) -> std::io::Result<()> {
     let tmp_path = target_json_path.with_extension("json.tmp");
@@ -121,8 +141,6 @@ fn wrap_with_metadata(original_path: &Path, raw: Value) -> Value {
     })
 }
 
-
-
 fn format_for_lsp_message(data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>) -> Vec<LspFileMessage> {
     data.iter()
         .filter_map(|(path, value)| {
@@ -149,6 +167,66 @@ impl Backend {
     async fn upsert_store_value(&self, original_path: &Path, value: &Value) {
         let mut guard = self.store.write().await;
         guard.insert(original_path.to_path_buf(), value.clone());
+    }
+
+    async fn save_function_reference(&self, original_path: &Path, value: &Value) {
+        let binding = value.clone();
+        let path_string = original_path.to_str().unwrap().to_string();
+
+        {
+          let mut connections = self.connections.write().await;
+          connections.retain(|c| c.file_use != path_string);
+        }
+        let mut imports_hashmap: HashMap<String, String> = HashMap::new();
+        let imports = binding
+            .get("imports")
+            .and_then(|v| v.as_array())
+            .expect("functions no es un array");
+        for import in imports {
+            let name: &str = import
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<sin nombre>");
+            let path: &str = import
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<sin nombre>");
+
+            imports_hashmap.insert(name.to_string(), path.to_string());
+        }
+
+        let functions = binding
+            .get("functions")
+            .and_then(|v| v.as_array())
+            .expect("functions no es un array");
+
+        for func in functions {
+            let functions_calls = func
+                .get("function_calls")
+                .and_then(|v| v.as_array())
+                .expect("function_calls no es un array");
+
+            for functions_call in functions_calls {
+                let name = functions_call
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<sin nombre>");
+                let import_name = functions_call
+                    .get("import_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<sin nombre>");
+
+                let path = imports_hashmap.get(import_name).unwrap().clone();
+                let connection = Connections {
+                    file_src: path,
+                    file_use: path_string.clone(),
+                    function: name.to_string()
+                };
+
+                let mut guard = self.connections.write().await;
+                guard.push(connection);
+            }
+        }
     }
 
     /// Persiste el resultado (con metadatos) a `<workspace>/.lsp-analysis/files/<hash>.json`.
@@ -226,20 +304,43 @@ impl LanguageServer for Backend {
 
         match run_analysis(Path::new(&path), &[works_space_root_clone]) {
             Ok(json_str) => {
+                eprintln!("STARTING");
                 // 1) Parseamos a Value (si falla, guardamos algo neutro)
                 let value: serde_json::Value = match serde_json::from_str(&json_str) {
                     Ok(v) => v,
                     Err(_) => serde_json::json!({ "raw": json_str }),
                 };
+                eprintln!("STARTING 2");
+
+                let old_version: HashMap<PathBuf, Value> = {
+                    let read_guard = self.store.read().await;
+                    read_guard.clone()
+                };
+
+                let old_connections: Vec<Connections> = {
+                    let read_guard = self.connections.read().await;
+                    read_guard.clone()
+                };
 
                 // 2) Actualizamos el store en memoria
                 self.upsert_store_value(&path, &value).await;
+                self.save_function_reference(&path, &value).await;
+                let changed_functions_firms: Vec<utils::FunctionChange> = utils::detect_function_changes(&path, &value, &old_version);
+                let files_to_warn = utils::affected_files_by_change(&changed_functions_firms, &old_connections, &path);
 
                 {
                   let map = self.store.read().await;
                   let message = format_for_lsp_message(map);
-                  eprintln!("{:?}", message);
+                  
                   self.client.send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message }).await;
+                  if files_to_warn.len() > 0 {
+                    eprintln!("sending changes");
+                    for (_, files) in files_to_warn {
+                      if files.len() > 0 {
+                        self.client.send_notification::<ShowFilesToChange>(ShowFilesToChangePayload { files: files }).await;
+                      }
+                    }
+                  }
                 }
 
                 // 3) Persistimos a disco (manejo de error no fatal)
@@ -281,9 +382,6 @@ impl LanguageServer for Backend {
             }
         }
     }
-
-
-  
 }
 
 #[tokio::main]
@@ -292,6 +390,7 @@ async fn main() {
 
   let (service, socket) = LspService::new(|client| Backend { client, 
     store: RwLock::new(HashMap::new()),
+    connections: RwLock::new(vec![]),
     workspace_root: RwLock::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
   });
       Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)

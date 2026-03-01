@@ -39,6 +39,7 @@ const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
 let client;
+let files;
 function activate(context) {
     const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development;
     const serverPath = context.asAbsolutePath(path.join("..", "lsp-backend", "target", "debug", "lsp-backend"));
@@ -64,8 +65,23 @@ function activate(context) {
         if (isDevelopment) {
             console.log("Recibido del LSP:", data);
         }
+        files = data.files;
         data.files.forEach(file => {
             vscode.window.showInformationMessage(`${file.file_name}`);
+        });
+    });
+    client.onNotification("lsp-server/showFilesToChange", (data) => {
+        if (isDevelopment) {
+            console.log("Recibido del LSP:", data);
+        }
+        files = data.files;
+        vscode.window.showInformationMessage(`Function was changes, make sure to modify any needed places`, 'Open files').then(selection => {
+            if (selection === 'Open files') {
+                files.forEach((file) => {
+                    vscode.workspace.openTextDocument(file)
+                        .then(doc => vscode.window.showTextDocument(doc, { preview: false }));
+                });
+            }
         });
     });
     const modeMsg = isDevelopment ? "LSP extension active! (Development Mode)" : "LSP extension active!";
@@ -94,20 +110,11 @@ function activate(context) {
             console.log('Message from webview:', message);
             if (message.command === 'requestData') {
                 panel.webview.postMessage({
-                    command: 'dataResponse',
-                    data: { nodes: [], edges: [] }
+                    command: 'lsp-server/processedJson',
+                    files: files
                 });
             }
         }, undefined, context.subscriptions);
-        // client.onNotification("lsp-server/customJson", (data) => {
-        //   if (isDevelopment) {
-        //     console.log("Recibido del LSP:", data);
-        //   }
-        //   panel.webview.postMessage({
-        //     command: 'lspData',
-        //     data: data
-        //   });
-        // });
     });
     context.subscriptions.push(disposable);
 }
