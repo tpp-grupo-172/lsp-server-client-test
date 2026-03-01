@@ -377,7 +377,7 @@ impl LanguageServer for Backend {
                 {
                   let map = self.store.read().await;
                   let message = format_for_lsp_message(map);
-                  
+
                   self.client.send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message }).await;
                   if files_to_warn.len() > 0 {
                     eprintln!("sending changes");
@@ -437,14 +437,13 @@ impl LanguageServer for Backend {
         });
         futures::future::join_all(futures).await;
     }
-
 }
 
 #[tokio::main]
 async fn main() {
   eprintln!("Server is up and running");
 
-  let (service, socket) = LspService::new(|client| Backend { client, 
+  let (service, socket) = LspService::new(|client| Backend { client,
     store: RwLock::new(HashMap::new()),
     connections: RwLock::new(vec![]),
     workspace_root: RwLock::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
