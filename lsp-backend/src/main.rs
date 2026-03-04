@@ -46,6 +46,8 @@ struct Backend {
     connections: RwLock<Vec<Connections>>,
     // Raíz del workspace (la resolvemos en initialize)
     workspace_root: RwLock<PathBuf>,
+    // Carpetas a ignorar (cargadas desde .lspignore)
+    ignored_folders: RwLock<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -141,6 +143,30 @@ fn wrap_with_metadata(original_path: &Path, raw: Value) -> Value {
 }
 
 
+
+async fn load_ignore_list(workspace_root: &Path) -> Vec<PathBuf> {
+    let ignore_file = workspace_root.join(".lspignore");
+    match fs::read_to_string(&ignore_file).await {
+        Ok(content) => content
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+            .map(|l| workspace_root.join(l.trim()))
+            .collect(),
+        Err(_) => vec![],
+    }
+}
+
+fn is_ignored(path: &Path, ignored_folders: &[PathBuf]) -> bool {
+    ignored_folders.iter().any(|folder| path.starts_with(folder))
+}
+
+/// Solo parseamos archivos que estén dentro de una carpeta tree-sitter-test/input-files
+/// (independiente del workspace root, así funciona aunque abras lsp-client u otra subcarpeta).
+fn is_parseable_path(path: &Path, _workspace_root: &Path) -> bool {
+    let s = path.to_string_lossy().replace('\\', "/");
+    s.contains("tree-sitter-test/input-files/") || s.ends_with("tree-sitter-test/input-files")
+}
+
 fn format_for_lsp_message(data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>) -> Vec<LspFileMessage> {
     data.iter()
         .filter_map(|(path, value)| {
@@ -163,6 +189,143 @@ fn format_for_lsp_message(data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>) ->
 }
 
 impl Backend {
+    async fn reload_ignore_list(&self) {
+        let root = { self.workspace_root.read().await.clone() };
+        let list = load_ignore_list(&root).await;
+        let mut guard = self.ignored_folders.write().await;
+        *guard = list;
+    }
+
+    async fn analyze_workspace(&self) {
+        let root = { self.workspace_root.read().await.clone() };
+        let ignored = { self.ignored_folders.read().await.clone() };
+
+        // Recorrido iterativo del workspace (evita async recursion)
+        let mut dirs: Vec<PathBuf> = vec![root.clone()];
+        let mut py_files: Vec<PathBuf> = Vec::new();
+
+        while let Some(dir) = dirs.pop() {
+            let mut read_dir = match fs::read_dir(&dir).await {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+            while let Ok(Some(entry)) = read_dir.next_entry().await {
+                let path = entry.path();
+                if is_ignored(&path, &ignored) {
+                    continue;
+                }
+                let Ok(ft) = entry.file_type().await else { continue };
+                if ft.is_dir() {
+                    dirs.push(path);
+                } else if ft.is_file()
+                    && path.extension().and_then(|e| e.to_str()) == Some("py")
+                    && is_parseable_path(&path, &root)
+                {
+                    py_files.push(path);
+                }
+            }
+        }
+
+        self.client
+            .log_message(MessageType::INFO, format!("Workspace scan: {} .py files found", py_files.len()))
+            .await;
+
+        for path in &py_files {
+            let path_clone = path.clone();
+            let root_clone = root.clone();
+            let result = tokio::task::spawn_blocking(move || run_analysis(&path_clone, &[root_clone])).await;
+            if let Ok(Ok(json_str)) = result {
+                let value: Value = serde_json::from_str(&json_str)
+                    .unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
+                self.upsert_store_value(path, &value).await;
+                let _ = self.persist_analysis_json(path, &value).await;
+            }
+        }
+
+        if !py_files.is_empty() {
+            let map = self.store.read().await;
+            let message = format_for_lsp_message(map);
+            self.client
+                .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
+                .await;
+        }
+    }
+
+    async fn register_fs_watchers(&self) {
+        let watchers = vec![
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/*".to_string()),
+                kind: Some(WatchKind::Create | WatchKind::Change | WatchKind::Delete),
+            },
+        ];
+
+        let options = DidChangeWatchedFilesRegistrationOptions { watchers };
+        let reg = Registration {
+            id: "fs-watchers-1".to_string(),
+            method: "workspace/didChangeWatchedFiles".to_string(),
+            register_options: Some(serde_json::to_value(options).unwrap()),
+        };
+
+        let _ = self.client.register_capability(vec![reg]).await;
+    }
+
+    async fn process_path_change(&self, path: &std::path::Path, typ: FileChangeType) {
+        // Si se modificó .lspignore, recargar la lista y salir
+        let root = { self.workspace_root.read().await.clone() };
+        if path == root.join(".lspignore") {
+            self.reload_ignore_list().await;
+            return;
+        }
+
+        // Saltear archivos en carpetas ignoradas
+        {
+            let ignored = self.ignored_folders.read().await;
+            if is_ignored(path, &ignored) {
+                return;
+            }
+        }
+
+        // Por ahora solo parsear archivos bajo tree-sitter-test/input-files/
+        if !is_parseable_path(path, &root) {
+            return;
+        }
+
+        match typ {
+            FileChangeType::CREATED | FileChangeType::CHANGED => {
+                let root = { self.workspace_root.read().await.clone() };
+                let path_clone = path.to_path_buf();
+                let root_clone = root.clone();
+                let result = tokio::task::spawn_blocking(move || run_analysis(&path_clone, &[root_clone])).await;
+                if let Ok(Ok(json_str)) = result {
+                    let value: serde_json::Value =
+                        serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
+                    self.upsert_store_value(path, &value).await;
+
+                    // Notifica al cliente con el agregado de este archivo
+                    let map = self.store.read().await;
+                    let message = format_for_lsp_message(map);
+                    self.client.send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message }).await;
+
+                    // Persiste a disco (ignora error no fatal)
+                    let _ = self.persist_analysis_json(path, &value).await;
+                }
+            }
+            FileChangeType::DELETED => {
+                // Opcional: borrar del store y del cache en disco
+                {
+                    let mut guard = self.store.write().await;
+                    guard.remove(path);
+                }
+                let root = { self.workspace_root.read().await.clone() };
+                let base = cache_root_for_workspace(&root);
+                let file_id = hash_path(path);
+                let target = base.join(format!("{file_id}.json"));
+                let _ = tokio::fs::remove_file(target).await;
+            }
+            _ => {}
+        }
+    }
+
     /// Guarda/actualiza el JSON analizado del archivo en el store en memoria.
     async fn upsert_store_value(&self, original_path: &Path, value: &Value) {
         let mut guard = self.store.write().await;
@@ -216,9 +379,11 @@ impl Backend {
                     .and_then(|v| v.as_str())
                     .unwrap_or("<sin nombre>");
 
-                let path = imports_hashmap.get(import_name).unwrap().clone();
+                let Some(path) = imports_hashmap.get(import_name) else {
+                    continue;
+                };
                 let connection = Connections {
-                    file_src: path,
+                    file_src: path.clone(),
                     file_use: path_string.clone(),
                     function: name.to_string()
                 };
@@ -249,61 +414,6 @@ impl Backend {
         write_json_atomic(&target, &wrapped).await?;
 
         Ok(target)
-    }
-
-    async fn process_path_change(&self, path: PathBuf, typ: FileChangeType) {
-        match typ {
-            FileChangeType::CREATED | FileChangeType::CHANGED => {
-                let works_space_root_clone;
-                {
-                works_space_root_clone = self.workspace_root.read().await.clone();
-                }
-                if let Ok(json_str) = run_analysis(&path, &[works_space_root_clone]) {
-                    let value: serde_json::Value =
-                        serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
-                    self.upsert_store_value(&path, &value).await;
-
-                    // Notifica al cliente con el agregado de este archivo
-                    let map = self.store.read().await;
-                    let message = format_for_lsp_message(map);
-                    self.client.send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message }).await;
-
-                    // Persiste a disco (ignora error no fatal)
-                    let _ = self.persist_analysis_json(&path, &value).await;
-                }
-            }
-            FileChangeType::DELETED => {
-                // Opcional: borrar del store y del cache en disco
-                {
-                    let mut guard = self.store.write().await;
-                    guard.remove(&path);
-                }
-                let root = { self.workspace_root.read().await.clone() };
-                let base = cache_root_for_workspace(&root);
-                let file_id = hash_path(&path);
-                let target = base.join(format!("{file_id}.json"));
-                let _ = tokio::fs::remove_file(target).await;
-            }
-            _ => {}
-        }
-    }
-
-    async fn register_fs_watchers(&self) {
-        let watchers = vec![
-            FileSystemWatcher {
-                glob_pattern: GlobPattern::String("**/*".to_string()),
-                kind: Some(WatchKind::Create | WatchKind::Change | WatchKind::Delete),
-            },
-        ];
-
-        let options = DidChangeWatchedFilesRegistrationOptions { watchers };
-        let reg = Registration {
-            id: "fs-watchers-1".to_string(),
-            method: "workspace/didChangeWatchedFiles".to_string(),
-            register_options: Some(serde_json::to_value(options).unwrap()),
-        };
-
-        let _ = self.client.register_capability(vec![reg]).await;
     }
 
 }
@@ -337,6 +447,8 @@ impl LanguageServer for Backend {
     async fn initialized(&self, _: InitializedParams) {
         self.client.log_message(MessageType::INFO, "Server initialized!").await;
         self.register_fs_watchers().await;
+        self.reload_ignore_list().await;
+        self.analyze_workspace().await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -352,20 +464,37 @@ impl LanguageServer for Backend {
             return;
         }
 
-        let works_space_root_clone;
-        {
-          works_space_root_clone = self.workspace_root.read().await.clone();
+        // Si se modificó .lspignore, recargar la lista y salir
+        let root = { self.workspace_root.read().await.clone() };
+        if path == root.join(".lspignore") {
+            self.reload_ignore_list().await;
+            return;
         }
 
-        match run_analysis(&path, &[works_space_root_clone]) {
+        // Saltear archivos en carpetas ignoradas
+        {
+            let ignored = self.ignored_folders.read().await;
+            if is_ignored(&path, &ignored) {
+                return;
+            }
+        }
+
+        // Por ahora solo parsear archivos bajo tree-sitter-test/input-files/
+        let root = { self.workspace_root.read().await.clone() };
+        if !is_parseable_path(&path, &root) {
+            return;
+        }
+
+        let path_clone = path.clone();
+        let root_clone = root.clone();
+        let analysis_result = tokio::task::spawn_blocking(move || run_analysis(&path_clone, &[root_clone])).await;
+        match analysis_result.unwrap_or(Err("spawn_blocking failed".to_string())) {
             Ok(json_str) => {
-                eprintln!("STARTING");
                 // 1) Parseamos a Value (si falla, guardamos algo neutro)
                 let value: serde_json::Value = match serde_json::from_str(&json_str) {
                     Ok(v) => v,
                     Err(_) => serde_json::json!({ "raw": json_str }),
                 };
-                eprintln!("STARTING 2");
 
                 let old_version: HashMap<PathBuf, Value> = {
                     let read_guard = self.store.read().await;
@@ -439,12 +568,13 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        // Procesa en paralelo pero con límite si quieres controlar carga
-        let futures = params.changes.into_iter().filter_map(|e| {
+        let changes: Vec<(PathBuf, FileChangeType)> = params.changes.into_iter().filter_map(|e| {
             let typ = e.typ;
-            e.uri.to_file_path().ok().map(move |p| self.process_path_change(p, typ))
-        });
-        futures::future::join_all(futures).await;
+            e.uri.to_file_path().ok().map(|p| (p, typ))
+        }).collect();
+
+        let futs: Vec<_> = changes.iter().map(|(p, typ)| self.process_path_change(p, *typ)).collect();
+        futures::future::join_all(futs).await;
     }
 }
 
@@ -456,6 +586,7 @@ async fn main() {
     store: RwLock::new(HashMap::new()),
     connections: RwLock::new(vec![]),
     workspace_root: RwLock::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+    ignored_folders: RwLock::new(vec![]),
   });
       Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
