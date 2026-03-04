@@ -11,7 +11,7 @@ let client: LanguageClient;
 
 let files: any;
 export function activate(context: vscode.ExtensionContext) {
-  const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development;
+  const isDevelopment = false // context.extensionMode === vscode.ExtensionMode.Development;
   const serverPath = context.asAbsolutePath(
     path.join("..", "lsp-backend", "target", "debug", "lsp-backend")
   );
@@ -77,6 +77,12 @@ export function activate(context: vscode.ExtensionContext) {
   vscode.window.showInformationMessage(modeMsg);
 
   const disposable = vscode.commands.registerCommand("myLspServer.showGraph", async () => {
+    const htmlPath = vscode.Uri.joinPath(context.extensionUri, "dist", "index.html");
+    const htmlFile = await vscode.workspace.fs.readFile(htmlPath);
+    let html = htmlFile.toString();
+    const promiseBlock = html.substring(html.indexOf('Promise.all(['), html.indexOf('});', html.indexOf('Promise.all([')) + 3);
+    console.log("bloque completo:", JSON.stringify(promiseBlock));
+
     const panel = vscode.window.createWebviewPanel(
       "dependencyGraph",
       "Dependency Graph",
@@ -84,34 +90,119 @@ export function activate(context: vscode.ExtensionContext) {
       {
         enableScripts: true,
         localResourceRoots: [
-          vscode.Uri.joinPath(context.extensionUri, "dist")
+          vscode.Uri.joinPath(context.extensionUri, "dist"),
+          vscode.Uri.joinPath(context.extensionUri, "dependency-graph", "dist"),
+          context.extensionUri
         ]
       }
     );
 
-    let html: string;
-
+    const baseUri = panel.webview.asWebviewUri(
+      vscode.Uri.joinPath(context.extensionUri, "dist")
+    );
+    
     if (isDevelopment) {
-      html = getViteDevHtml();
+      // let html: string;
+      html = await getViteDevHtml();
       vscode.window.showInformationMessage("Cargando grafo desde servidor local (modo dev)");
     } else {
-      const htmlPath = vscode.Uri.joinPath(context.extensionUri, "dist", "index.html");
-      const htmlFile = await vscode.workspace.fs.readFile(htmlPath);
-      html = htmlFile.toString();
+      // SvelteKit static adapter places assets in /assets/ if appDir: 'assets'
+      html = html.replace(/\.\/_app\//g, `${baseUri.toString()}/_app/`);
 
-      const baseUri = panel.webview.asWebviewUri(
-        vscode.Uri.joinPath(context.extensionUri, "dist")
+      html = html.replace(
+        `base: new URL(".", location).pathname.slice(0, -1)`,
+        `base: new URL(".", "${baseUri.toString()}/").pathname.slice(0, -1)`
       );
 
-      // SvelteKit static adapter places assets in /assets/ if appDir: 'assets'
-      html = html.replace(/(href|src)="\/assets\//g, `$1="${baseUri.toString()}/assets/`);
+      const nonce = Math.random().toString(36).substring(2);
+      html = html.replace(`<script>`, `<script nonce="${nonce}">`);
+
+      html = html.replace(
+        "]).then(([kit, app]) => {\n\t\t\t\t\t\tkit.start(app, element);\n\t\t\t\t\t});",
+        "]).then(([kit, app]) => {\n\t\t\t\t\t\ttry { kit.start(app, element); } catch(e) { document.body.innerHTML = '<h1 style=\"color:red\">ERROR EN START: ' + e.message + '</h1>'; }\n\t\t\t\t\t}).catch(e => {\n\t\t\t\t\t\tdocument.body.innerHTML = '<h1 style=\"color:red\">IMPORT ERROR: ' + e.message + '</h1>';\n\t\t\t\t\t});"
+      );
+
+      html = html.replace(
+        "]).then(([kit, app]) => {",
+        `]);
+        
+        setTimeout(() => {
+          document.body.innerHTML += '<h1 style="color:orange">IMPORTS COLGADOS</h1>';
+        }, 3000);
+        
+        Promise.all([`
+      );
+
+      const idx = html.indexOf('Promise.all([');
+      console.log("Promise.all encontrado en:", idx);
+
+      console.log("patch aplicado:", html.includes('ERROR EN START'));
+
+      // html = html.replace(
+      //   "__sveltekit_",
+      //   "document.body.innerHTML += '<p style=\"color:yellow\">Script ejecutando...</p>';\n\t\t\t\t__sveltekit_"
+      // );
+
+      // html = html.replace(
+      //   `</body>`,
+      //   `<script nonce="${nonce}">
+      //     const __vscode = acquireVsCodeApi();
+      //     __vscode.postMessage({ command: 'debug', msg: 'inicial' });
+      //     setTimeout(() => {
+      //       __vscode.postMessage({ command: 'debug', msg: 'body despues de 2s: ' + document.body.innerHTML.substring(0, 300) });
+      //     }, 2000);
+      //   </script>
+      //   </body>`
+      // );
+
+      const startMatch = html.match(/import\("\.\/\_app\/immutable\/entry\/(start\.[^"]+\.js)"\)/);
+      const appMatch = html.match(/import\("\.\/\_app\/immutable\/entry\/(app\.[^"]+\.js)"\)/);
+
+      const startFile = startMatch ? startMatch[1] : '';
+      const appFile = appMatch ? appMatch[1] : '';
+
+      console.log("start:", startFile, "app:", appFile);
+
+      html = html.replace(
+        /Promise\.all\(\[[\s\S]*?\]\)\.then\(\(\[kit, app\]\) => \{[\s\S]*?kit\.start\(app, element\);[\s\S]*?\}\);/,
+        `setTimeout(() => {
+          document.body.innerHTML += '<h1 style="color:orange;position:fixed;top:0">IMPORTS COLGADOS</h1>';
+        }, 3000);
+        
+        Promise.all([
+          import("${baseUri.toString()}/_app/immutable/entry/${startFile}"),
+          import("${baseUri.toString()}/_app/immutable/entry/${appFile}")
+        ]).then(([kit, app]) => {
+          document.body.innerHTML += '<h1 style="color:green;position:fixed;top:0">IMPORTS OK</h1>';
+          kit.start(app, element);
+        }).catch(function(e) {
+          document.body.innerHTML += '<h1 style="color:red;position:fixed;top:0">ERROR: ' + e.message + '</h1>';
+        });`
+      );
+
+      console.log("regex match:", /Promise\.all\(\[[\s\S]*?\]\)\.then\(\(\[kit, app\]\) => \{[\s\S]*?kit\.start\(app, element\);[\s\S]*?\}\);/.test(html));
+
+
+      console.log("base reemplazado:", html.includes(`base: ""`));
+      console.log("_app reemplazado:", html.includes(baseUri.toString()));
     }
+
+    console.log("Asignando HTML, longitud:", html.length);
+    console.log("bloque promise:", html.substring(html.indexOf('Promise.all'), html.indexOf('Promise.all') + 600));
+    console.log("catch agregado:", html.includes('SvelteKit cargado OK'));
+
+
+    const idx = html.indexOf(']).then(([kit, app])');
+    console.log("fragmento exacto:", JSON.stringify(html.substring(idx, idx + 100)));
 
     panel.webview.html = html;
 
     panel.webview.onDidReceiveMessage(
       message => {
         console.log('Message from webview:', message);
+        if (message.command === 'debug') {
+          console.log("DEBUG desde webview:", message.msg);
+        }
         if (message.command === 'requestData') {
           panel.webview.postMessage({
             command: 'lsp-server/processedJson',
@@ -127,22 +218,17 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(disposable);
 }
 
-function getViteDevHtml(): string {
+async function getViteDevHtml(): Promise<string> {
   const vitePort = 5173;
+  const base = `http://localhost:${vitePort}`;
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dependency Graph (Dev)</title>
-</head>
-<body>
-  <div id="app"></div>
-  <script type="module" src="http://localhost:${vitePort}/@vite/client"></script>
-  <script type="module" src="http://localhost:${vitePort}/src/main.ts"></script>
-</body>
-</html>`;
+  const res = await fetch(`${base}/`);
+  let html = await res.text();
+
+  html = html.replace(/(src|href)="\//g, `$1="${base}/`);
+  html = html.replace(/(src|href)="\.\//g, `$1="${base}/`);
+
+  return html;
 }
 
 export function deactivate(): Thenable<void> | undefined {

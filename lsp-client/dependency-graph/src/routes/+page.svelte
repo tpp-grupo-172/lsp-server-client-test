@@ -1,14 +1,17 @@
-<script>
-	import { onMount } from "svelte";
-	import GraphView from "$lib/GraphView.svelte";
+<!-- <script>
 	import { GraphCache } from "$lib/GraphCache.js";
+	import GraphView from "$lib/GraphView.svelte";
+	import { onMount } from "svelte";
 
 	/** @type {GraphCache | null} */
-	let graphCache = $state(null);
+  let graphCache = null;
+  let error = null;
 
 	onMount(() => {
+		// @ts-ignore
 		const vscode = acquireVsCodeApi();
 
+		// @ts-ignore
 		const messageHandler = (event) => {
 			const message = event.data;
 			if (message.command === "lsp-server/processedJson") {
@@ -26,9 +29,29 @@
 			window.removeEventListener("message", messageHandler);
 		};
 	});
+</script> -->
+
+<script>
+  import { onMount } from 'svelte';
+  
+  let mounted = false;
+  
+  onMount(() => {
+    mounted = true;
+  });
 </script>
 
-{#if graphCache}
+<div style="color: white; font-size: 32px; padding: 20px;">
+  mounted: {mounted}
+</div>
+
+<div
+  style="display: flex; justify-content: center; align-items: center; height: 100vh; color: var(--vscode-editor-foreground);"
+>
+  <div>Loading dependency graph 2...</div>
+</div>
+
+<!-- {#if graphCache}
 	<GraphView {graphCache} />
 {:else}
 	<div
@@ -36,4 +59,8 @@
 	>
 		<div>Loading dependency graph...</div>
 	</div>
-{/if}
+{/if} -->
+
+<svelte:head>
+  <base href="/" />
+</svelte:head>

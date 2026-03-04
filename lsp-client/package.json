@@ -3,7 +3,7 @@
   "displayName": "My LSP Extension",
   "description": "VS Code client for my custom Rust LSP server",
   "version": "0.0.1",
-  "publisher": "yourname",
+  "publisher": "federicoprivate",
   "engines": {
     "vscode": "^1.80.0"
   },

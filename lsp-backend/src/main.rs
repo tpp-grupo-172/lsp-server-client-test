@@ -216,15 +216,17 @@ impl Backend {
                     .and_then(|v| v.as_str())
                     .unwrap_or("<sin nombre>");
 
-                let path = imports_hashmap.get(import_name).unwrap().clone();
-                let connection = Connections {
-                    file_src: path,
-                    file_use: path_string.clone(),
-                    function: name.to_string()
-                };
+                if let Some(path) = imports_hashmap.get(import_name) {
+                  let cloned_path = path.clone();
+                  let connection = Connections {
+                      file_src: cloned_path,
+                      file_use: path_string.clone(),
+                      function: name.to_string()
+                  };
 
-                let mut guard = self.connections.write().await;
-                guard.push(connection);
+                  let mut guard = self.connections.write().await;
+                  guard.push(connection);
+                }
             }
         }
     }
@@ -438,14 +440,14 @@ impl LanguageServer for Backend {
         }
     }
 
-    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        // Procesa en paralelo pero con límite si quieres controlar carga
-        let futures = params.changes.into_iter().filter_map(|e| {
-            let typ = e.typ;
-            e.uri.to_file_path().ok().map(move |p| self.process_path_change(p, typ))
-        });
-        futures::future::join_all(futures).await;
-    }
+    // async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+    //     // Procesa en paralelo pero con límite si quieres controlar carga
+    //     let futures = params.changes.into_iter().filter_map(|e| {
+    //         let typ = e.typ;
+    //         e.uri.to_file_path().ok().map(move |p| self.process_path_change(p, typ))
+    //     });
+    //     futures::future::join_all(futures).await;
+    // }
 }
 
 #[tokio::main]
