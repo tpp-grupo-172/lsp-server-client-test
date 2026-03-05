@@ -66,9 +66,6 @@ function activate(context) {
             console.log("Recibido del LSP:", data);
         }
         files = data.files;
-        data.files.forEach(file => {
-            vscode.window.showInformationMessage(`${file.file_name}`);
-        });
     });
     client.onNotification("lsp-server/showFilesToChange", (data) => {
         if (isDevelopment) {
@@ -94,7 +91,7 @@ function activate(context) {
             ]
         });
         let html;
-        if (!isDevelopment) {
+        if (isDevelopment) {
             html = getViteDevHtml();
             vscode.window.showInformationMessage("Cargando grafo desde servidor local (modo dev)");
         }
@@ -103,7 +100,8 @@ function activate(context) {
             const htmlFile = await vscode.workspace.fs.readFile(htmlPath);
             html = htmlFile.toString();
             const baseUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, "dist"));
-            html = html.replace(/\/assets\//g, `${baseUri.toString()}/assets/`);
+            // SvelteKit static adapter places assets in /assets/ if appDir: 'assets'
+            html = html.replace(/(href|src)="\/assets\//g, `$1="${baseUri.toString()}/assets/`);
         }
         panel.webview.html = html;
         panel.webview.onDidReceiveMessage(message => {

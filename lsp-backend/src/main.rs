@@ -358,6 +358,48 @@ impl Backend {
             imports_hashmap.insert(name.to_string(), path.to_string());
         }
 
+        let calsses = binding
+            .get("classes")
+            .and_then(|v| v.as_array())
+            .expect("classes no es un array");
+        
+        for calss in calsses {
+            let methods = calss
+              .get("methods")
+              .and_then(|v| v.as_array())
+              .expect("methods no es un array");
+
+            for method in methods {
+                let functions_calls_in_classes = method
+                  .get("function_calls")
+                  .and_then(|v| v.as_array())
+                  .expect("function_calls no es un array");
+
+                for functions_call_in_class in functions_calls_in_classes {
+                  let name = functions_call_in_class
+                      .get("name")
+                      .and_then(|v| v.as_str())
+                      .unwrap_or("<sin nombre>");
+                  let import_name = functions_call_in_class
+                      .get("import_name")
+                      .and_then(|v| v.as_str())
+                      .unwrap_or("<sin nombre>");
+
+                  if let Some(path) = imports_hashmap.get(import_name) {
+                    let cloned_path = path.clone();
+                    let connection = Connections {
+                        file_src: cloned_path,
+                        file_use: path_string.clone(),
+                        function: name.to_string()
+                    };
+
+                    let mut guard = self.connections.write().await;
+                    guard.push(connection);
+                  }
+                }
+            }
+        }
+
         let functions = binding
             .get("functions")
             .and_then(|v| v.as_array())
@@ -379,17 +421,17 @@ impl Backend {
                     .and_then(|v| v.as_str())
                     .unwrap_or("<sin nombre>");
 
-                let Some(path) = imports_hashmap.get(import_name) else {
-                    continue;
-                };
-                let connection = Connections {
-                    file_src: path.clone(),
-                    file_use: path_string.clone(),
-                    function: name.to_string()
-                };
+                if let Some(path) = imports_hashmap.get(import_name) {
+                  let cloned_path = path.clone();
+                  let connection = Connections {
+                      file_src: cloned_path,
+                      file_use: path_string.clone(),
+                      function: name.to_string()
+                  };
 
-                let mut guard = self.connections.write().await;
-                guard.push(connection);
+                  let mut guard = self.connections.write().await;
+                  guard.push(connection);
+                }
             }
         }
     }
@@ -479,12 +521,6 @@ impl LanguageServer for Backend {
             }
         }
 
-        // Por ahora solo parsear archivos bajo tree-sitter-test/input-files/
-        let root = { self.workspace_root.read().await.clone() };
-        if !is_parseable_path(&path, &root) {
-            return;
-        }
-
         let path_clone = path.clone();
         let root_clone = root.clone();
         let analysis_result = tokio::task::spawn_blocking(move || run_analysis(&path_clone, &[root_clone])).await;
@@ -511,7 +547,7 @@ impl LanguageServer for Backend {
                 self.save_function_reference(&path, &value).await;
                 let changed_functions_firms: Vec<utils::FunctionChange> = utils::detect_function_changes(&path, &value, &old_version);
                 let files_to_warn = utils::affected_files_by_change(&changed_functions_firms, &old_connections, &path);
-
+                eprintln!("{:?}", files_to_warn);
                 {
                   let map = self.store.read().await;
                   let message = format_for_lsp_message(map);

@@ -268,6 +268,10 @@ pub fn affected_files_by_change(
         })
         .collect();
 
+
+    eprintln!("changes: {:?}", changes);
+    eprintln!("connections: {:?}", connections);
+
     let mut result: HashMap<String, Vec<String>> = HashMap::new();
 
     for conn in connections

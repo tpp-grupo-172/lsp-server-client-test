@@ -99,6 +99,5 @@ export const mockTreeSitterData = {
       ],
       classes: []
     },
-
   ]
 };

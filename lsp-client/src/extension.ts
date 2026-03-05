@@ -48,11 +48,6 @@ export function activate(context: vscode.ExtensionContext) {
       console.log("Recibido del LSP:", data);
     }
     files = data.files;
-    data.files.forEach(file => {
-      vscode.window.showInformationMessage(
-        `${file.file_name}`
-      );
-    });
   });
 
   client.onNotification("lsp-server/showFilesToChange", (data: { files: string[]}) => {

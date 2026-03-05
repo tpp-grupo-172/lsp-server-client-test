@@ -1,10 +1,11 @@
 <script>
-	import { onMount } from "svelte";
-	import GraphView from "$lib/GraphView.svelte";
 	import { GraphCache } from "$lib/GraphCache.js";
+	import GraphView from "$lib/GraphView.svelte";
+	import { mockTreeSitterData } from "$lib/mockData";
+	import { onMount } from "svelte";
 
 	/** @type {GraphCache | null} */
-	let graphCache = $state(null);
+	let graphCache = $state(new GraphCache(mockTreeSitterData));
 
 	onMount(() => {
 		const vscode = acquireVsCodeApi();
