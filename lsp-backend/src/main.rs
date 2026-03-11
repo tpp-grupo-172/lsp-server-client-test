@@ -9,7 +9,6 @@ use tree_sitter_test::run_analysis;
 use blake3; // Hash para los paths
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -169,13 +168,6 @@ fn is_ignored(path: &Path, ignored_folders: &[PathBuf]) -> bool {
         .any(|folder| path.starts_with(folder))
 }
 
-/// Solo parseamos archivos que estén dentro de una carpeta tree-sitter-test/input-files
-/// (independiente del workspace root, así funciona aunque abras lsp-client u otra subcarpeta).
-fn is_parseable_path(path: &Path, _workspace_root: &Path) -> bool {
-    let s = path.to_string_lossy().replace('\\', "/");
-    s.contains("tree-sitter-test/input-files/") || s.ends_with("tree-sitter-test/input-files")
-}
-
 fn format_for_lsp_message(
     data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>,
 ) -> Vec<LspFileMessage> {
@@ -232,7 +224,6 @@ impl Backend {
                     dirs.push(path);
                 } else if ft.is_file()
                     && path.extension().and_then(|e| e.to_str()) == Some("py")
-                    && is_parseable_path(&path, &root)
                 {
                     py_files.push(path);
                 }
@@ -294,17 +285,16 @@ impl Backend {
             return;
         }
 
+        if path.extension().and_then(|e| e.to_str()) != Some("py") {
+          return;
+        }
+
         // Saltear archivos en carpetas ignoradas
         {
             let ignored = self.ignored_folders.read().await;
             if is_ignored(path, &ignored) {
                 return;
             }
-        }
-
-        // Por ahora solo parsear archivos bajo tree-sitter-test/input-files/
-        if !is_parseable_path(path, &root) {
-            return;
         }
 
         match typ {
