@@ -1,7 +1,7 @@
+use crate::{Connections, FunctionsInFiles};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use crate::Connections;
 
 const RENAME_CONFIDENCE_THRESHOLD: f32 = 0.65;
 
@@ -268,10 +268,6 @@ pub fn affected_files_by_change(
         })
         .collect();
 
-
-    eprintln!("changes: {:?}", changes);
-    eprintln!("connections: {:?}", connections);
-
     let mut result: HashMap<String, Vec<String>> = HashMap::new();
 
     for conn in connections
@@ -285,4 +281,20 @@ pub fn affected_files_by_change(
     }
 
     result
+}
+
+pub fn find_unused_functions(
+    functions_in_files: &[FunctionsInFiles],
+    connections: &[Connections],
+) -> Vec<FunctionsInFiles> {
+    let used: HashSet<(&str, &str)> = connections
+        .iter()
+        .map(|c| (c.file_src.as_str(), c.function.as_str()))
+        .collect();
+
+    functions_in_files
+        .iter()
+        .filter(|f| !used.contains(&(f.file_src.as_str(), f.function.as_str())))
+        .cloned()
+        .collect()
 }

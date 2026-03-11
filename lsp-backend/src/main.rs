@@ -1,19 +1,21 @@
-use tower_lsp::jsonrpc::Result;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tower_lsp::lsp_types::*;
+use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::notification::Notification;
+use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tree_sitter_test::run_analysis;
 
 use blake3; // Hash para los paths
+use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::HashSet;
-use std::{collections::HashMap, path::{Path, PathBuf}};
-use tokio::sync::{RwLock, RwLockReadGuard};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use serde_json::Value;
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 mod utils;
 
@@ -38,12 +40,19 @@ struct Connections {
     function: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct FunctionsInFiles {
+    file_src: String,
+    function: String,
+}
+
 #[derive(Debug)]
 struct Backend {
     client: Client,
     // Estado global: resultados por archivo (en memoria)
     store: RwLock<HashMap<PathBuf, Value>>,
     connections: RwLock<Vec<Connections>>,
+    functions_in_file: RwLock<Vec<FunctionsInFiles>>,
     // Raíz del workspace (la resolvemos en initialize)
     workspace_root: RwLock<PathBuf>,
     // Carpetas a ignorar (cargadas desde .lspignore)
@@ -132,7 +141,6 @@ async fn write_json_atomic(target_json_path: &Path, json: &Value) -> std::io::Re
     fs::rename(&tmp_path, target_json_path).await
 }
 
-
 fn wrap_with_metadata(original_path: &Path, raw: Value) -> Value {
     json!({
         "schema_version": 1,
@@ -141,8 +149,6 @@ fn wrap_with_metadata(original_path: &Path, raw: Value) -> Value {
         "data": raw
     })
 }
-
-
 
 async fn load_ignore_list(workspace_root: &Path) -> Vec<PathBuf> {
     let ignore_file = workspace_root.join(".lspignore");
@@ -157,17 +163,14 @@ async fn load_ignore_list(workspace_root: &Path) -> Vec<PathBuf> {
 }
 
 fn is_ignored(path: &Path, ignored_folders: &[PathBuf]) -> bool {
-    ignored_folders.iter().any(|folder| path.starts_with(folder))
+    ignored_folders
+        .iter()
+        .any(|folder| path.starts_with(folder))
 }
 
-/// Solo parseamos archivos que estén dentro de una carpeta tree-sitter-test/input-files
-/// (independiente del workspace root, así funciona aunque abras lsp-client u otra subcarpeta).
-fn is_parseable_path(path: &Path, _workspace_root: &Path) -> bool {
-    let s = path.to_string_lossy().replace('\\', "/");
-    s.contains("tree-sitter-test/input-files/") || s.ends_with("tree-sitter-test/input-files")
-}
-
-fn format_for_lsp_message(data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>) -> Vec<LspFileMessage> {
+fn format_for_lsp_message(
+    data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>,
+) -> Vec<LspFileMessage> {
     data.iter()
         .filter_map(|(path, value)| {
             // aseguramos que el Value tenga las keys esperadas
@@ -214,12 +217,13 @@ impl Backend {
                 if is_ignored(&path, &ignored) {
                     continue;
                 }
-                let Ok(ft) = entry.file_type().await else { continue };
+                let Ok(ft) = entry.file_type().await else {
+                    continue;
+                };
                 if ft.is_dir() {
                     dirs.push(path);
                 } else if ft.is_file()
                     && path.extension().and_then(|e| e.to_str()) == Some("py")
-                    && is_parseable_path(&path, &root)
                 {
                     py_files.push(path);
                 }
@@ -227,17 +231,23 @@ impl Backend {
         }
 
         self.client
-            .log_message(MessageType::INFO, format!("Workspace scan: {} .py files found", py_files.len()))
+            .log_message(
+                MessageType::INFO,
+                format!("Workspace scan: {} .py files found", py_files.len()),
+            )
             .await;
 
         for path in &py_files {
             let path_clone = path.clone();
             let root_clone = root.clone();
-            let result = tokio::task::spawn_blocking(move || run_analysis(&path_clone, &[root_clone])).await;
+            let result =
+                tokio::task::spawn_blocking(move || run_analysis(&path_clone, &[root_clone])).await;
             if let Ok(Ok(json_str)) = result {
                 let value: Value = serde_json::from_str(&json_str)
                     .unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
                 self.upsert_store_value(path, &value).await;
+                self.save_function_reference(&path, &value).await;
+                self.save_functions(&path, &value).await;
                 let _ = self.persist_analysis_json(path, &value).await;
             }
         }
@@ -252,12 +262,10 @@ impl Backend {
     }
 
     async fn register_fs_watchers(&self) {
-        let watchers = vec![
-            FileSystemWatcher {
-                glob_pattern: GlobPattern::String("**/*".to_string()),
-                kind: Some(WatchKind::Create | WatchKind::Change | WatchKind::Delete),
-            },
-        ];
+        let watchers = vec![FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/*".to_string()),
+            kind: Some(WatchKind::Create | WatchKind::Change | WatchKind::Delete),
+        }];
 
         let options = DidChangeWatchedFilesRegistrationOptions { watchers };
         let reg = Registration {
@@ -277,6 +285,10 @@ impl Backend {
             return;
         }
 
+        if path.extension().and_then(|e| e.to_str()) != Some("py") {
+          return;
+        }
+
         // Saltear archivos en carpetas ignoradas
         {
             let ignored = self.ignored_folders.read().await;
@@ -285,26 +297,27 @@ impl Backend {
             }
         }
 
-        // Por ahora solo parsear archivos bajo tree-sitter-test/input-files/
-        if !is_parseable_path(path, &root) {
-            return;
-        }
-
         match typ {
             FileChangeType::CREATED | FileChangeType::CHANGED => {
                 let root = { self.workspace_root.read().await.clone() };
                 let path_clone = path.to_path_buf();
                 let root_clone = root.clone();
-                let result = tokio::task::spawn_blocking(move || run_analysis(&path_clone, &[root_clone])).await;
+                let result =
+                    tokio::task::spawn_blocking(move || run_analysis(&path_clone, &[root_clone]))
+                        .await;
                 if let Ok(Ok(json_str)) = result {
-                    let value: serde_json::Value =
-                        serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
+                    let value: serde_json::Value = serde_json::from_str(&json_str)
+                        .unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
                     self.upsert_store_value(path, &value).await;
+                    self.save_function_reference(&path, &value).await;
+                    self.save_functions(&path, &value).await;
 
                     // Notifica al cliente con el agregado de este archivo
                     let map = self.store.read().await;
                     let message = format_for_lsp_message(map);
-                    self.client.send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message }).await;
+                    self.client
+                        .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
+                        .await;
 
                     // Persiste a disco (ignora error no fatal)
                     let _ = self.persist_analysis_json(path, &value).await;
@@ -337,8 +350,8 @@ impl Backend {
         let path_string = original_path.to_str().unwrap().to_string();
 
         {
-          let mut connections = self.connections.write().await;
-          connections.retain(|c| c.file_use != path_string);
+            let mut connections = self.connections.write().await;
+            connections.retain(|c| c.file_use != path_string);
         }
         let mut imports_hashmap: HashMap<String, String> = HashMap::new();
         let imports = binding
@@ -362,40 +375,40 @@ impl Backend {
             .get("classes")
             .and_then(|v| v.as_array())
             .expect("classes no es un array");
-        
+
         for calss in calsses {
             let methods = calss
-              .get("methods")
-              .and_then(|v| v.as_array())
-              .expect("methods no es un array");
+                .get("methods")
+                .and_then(|v| v.as_array())
+                .expect("methods no es un array");
 
             for method in methods {
                 let functions_calls_in_classes = method
-                  .get("function_calls")
-                  .and_then(|v| v.as_array())
-                  .expect("function_calls no es un array");
+                    .get("function_calls")
+                    .and_then(|v| v.as_array())
+                    .expect("function_calls no es un array");
 
                 for functions_call_in_class in functions_calls_in_classes {
-                  let name = functions_call_in_class
-                      .get("name")
-                      .and_then(|v| v.as_str())
-                      .unwrap_or("<sin nombre>");
-                  let import_name = functions_call_in_class
-                      .get("import_name")
-                      .and_then(|v| v.as_str())
-                      .unwrap_or("<sin nombre>");
+                    let name = functions_call_in_class
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<sin nombre>");
+                    let import_name = functions_call_in_class
+                        .get("import_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<sin nombre>");
 
-                  if let Some(path) = imports_hashmap.get(import_name) {
-                    let cloned_path = path.clone();
-                    let connection = Connections {
-                        file_src: cloned_path,
-                        file_use: path_string.clone(),
-                        function: name.to_string()
-                    };
+                    if let Some(path) = imports_hashmap.get(import_name) {
+                        let cloned_path = path.clone();
+                        let connection = Connections {
+                            file_src: cloned_path,
+                            file_use: path_string.clone(),
+                            function: name.to_string(),
+                        };
 
-                    let mut guard = self.connections.write().await;
-                    guard.push(connection);
-                  }
+                        let mut guard = self.connections.write().await;
+                        guard.push(connection);
+                    }
                 }
             }
         }
@@ -422,24 +435,74 @@ impl Backend {
                     .unwrap_or("<sin nombre>");
 
                 if let Some(path) = imports_hashmap.get(import_name) {
-                  let cloned_path = path.clone();
-                  let connection = Connections {
-                      file_src: cloned_path,
-                      file_use: path_string.clone(),
-                      function: name.to_string()
-                  };
+                    let cloned_path = path.clone();
+                    let connection = Connections {
+                        file_src: cloned_path,
+                        file_use: path_string.clone(),
+                        function: name.to_string(),
+                    };
 
-                  let mut guard = self.connections.write().await;
-                  guard.push(connection);
+                    let mut guard = self.connections.write().await;
+                    guard.push(connection);
                 }
             }
         }
     }
 
+    async fn save_functions(&self, original_path: &Path, value: &Value) {
+        let binding = value.clone();
+        let path_string = original_path.to_str().unwrap().to_string();
+
+        let calsses = binding
+            .get("classes")
+            .and_then(|v| v.as_array())
+            .expect("classes no es un array");
+
+        for calss in calsses {
+            let methods = calss
+                .get("methods")
+                .and_then(|v| v.as_array())
+                .expect("methods no es un array");
+
+            for method in methods {
+                if let Some(function_name) = method.get("name").and_then(|v| v.as_str()) {
+                    let cloned_path = path_string.clone();
+                    let functions_in_file = FunctionsInFiles {
+                        file_src: cloned_path,
+                        function: function_name.to_string(),
+                    };
+
+                    let mut guard = self.functions_in_file.write().await;
+                    guard.push(functions_in_file);
+                }
+            }
+        }
+
+        let functions = binding
+            .get("functions")
+            .and_then(|v| v.as_array())
+            .expect("functions no es un array");
+
+        for function in functions {
+            if let Some(function_name) = function.get("name").and_then(|v| v.as_str()) {
+                let cloned_path = path_string.clone();
+                let functions_in_file = FunctionsInFiles {
+                    file_src: cloned_path,
+                    function: function_name.to_string(),
+                };
+
+                let mut guard = self.functions_in_file.write().await;
+                guard.push(functions_in_file);
+            }
+        }
+    }
+
     /// Persiste el resultado (con metadatos) a `<workspace>/.lsp-analysis/files/<hash>.json`.
-    async fn persist_analysis_json(&self, original_path: &Path, raw_json: &Value)
-        -> std::io::Result<PathBuf>
-    {
+    async fn persist_analysis_json(
+        &self,
+        original_path: &Path,
+        raw_json: &Value,
+    ) -> std::io::Result<PathBuf> {
         // 1) Leemos el workspace root guardado en initialize
         let root = { self.workspace_root.read().await.clone() };
 
@@ -457,16 +520,11 @@ impl Backend {
 
         Ok(target)
     }
-
 }
-
-
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-
         let resolved_root = resolve_workspace_root(&params)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
@@ -478,7 +536,7 @@ impl LanguageServer for Backend {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                  TextDocumentSyncKind::FULL,
+                    TextDocumentSyncKind::FULL,
                 )),
                 ..Default::default()
             },
@@ -487,7 +545,9 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.client.log_message(MessageType::INFO, "Server initialized!").await;
+        self.client
+            .log_message(MessageType::INFO, "Server initialized!")
+            .await;
         self.register_fs_watchers().await;
         self.reload_ignore_list().await;
         self.analyze_workspace().await;
@@ -502,7 +562,9 @@ impl LanguageServer for Backend {
         let path = uri.to_file_path().unwrap_or_default();
 
         if !path.exists() {
-            self.client.show_message(MessageType::ERROR, "File not found").await;
+            self.client
+                .show_message(MessageType::ERROR, "File not found")
+                .await;
             return;
         }
 
@@ -523,7 +585,8 @@ impl LanguageServer for Backend {
 
         let path_clone = path.clone();
         let root_clone = root.clone();
-        let analysis_result = tokio::task::spawn_blocking(move || run_analysis(&path_clone, &[root_clone])).await;
+        let analysis_result =
+            tokio::task::spawn_blocking(move || run_analysis(&path_clone, &[root_clone])).await;
         match analysis_result.unwrap_or(Err("spawn_blocking failed".to_string())) {
             Ok(json_str) => {
                 // 1) Parseamos a Value (si falla, guardamos algo neutro)
@@ -545,22 +608,73 @@ impl LanguageServer for Backend {
                 // 2) Actualizamos el store en memoria
                 self.upsert_store_value(&path, &value).await;
                 self.save_function_reference(&path, &value).await;
-                let changed_functions_firms: Vec<utils::FunctionChange> = utils::detect_function_changes(&path, &value, &old_version);
-                let files_to_warn = utils::affected_files_by_change(&changed_functions_firms, &old_connections, &path);
-                eprintln!("{:?}", files_to_warn);
+                self.save_functions(&path, &value).await;
+                let changed_functions_firms: Vec<utils::FunctionChange> =
+                    utils::detect_function_changes(&path, &value, &old_version);
+                let files_to_warn = utils::affected_files_by_change(
+                    &changed_functions_firms,
+                    &old_connections,
+                    &path,
+                );
                 {
-                  let map = self.store.read().await;
-                  let message = format_for_lsp_message(map);
+                    let map = self.store.read().await;
+                    let current_connections = self.connections.read().await;
+                    let functions_in_file_lock = self.functions_in_file.read().await;
+                    let unused_functions: Vec<FunctionsInFiles> =
+                        utils::find_unused_functions(&functions_in_file_lock, &current_connections);
+                    let message = format_for_lsp_message(map);
 
-                  self.client.send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message }).await;
-                  if files_to_warn.len() > 0 {
-                    eprintln!("sending changes");
-                    for (_, files) in files_to_warn {
-                      if files.len() > 0 {
-                        self.client.send_notification::<ShowFilesToChange>(ShowFilesToChangePayload { files: files }).await;
-                      }
+                    self.client
+                        .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
+                        .await;
+                    if files_to_warn.len() > 0 {
+                        for (_, files) in files_to_warn {
+                            if files.len() > 0 {
+                                self.client
+                                    .send_notification::<ShowFilesToChange>(
+                                        ShowFilesToChangePayload { files: files },
+                                    )
+                                    .await;
+                            }
+                        }
                     }
-                  }
+                    if unused_functions.len() > 0 {
+                        let mut by_file: HashMap<String, Vec<String>> = HashMap::new();
+                        for f in &unused_functions {
+                            by_file
+                                .entry(f.file_src.clone())
+                                .or_default()
+                                .push(f.function.clone());
+                        }
+
+                        for (file_src, functions) in by_file {
+                            let diagnostics: Vec<Diagnostic> = functions
+                                .iter()
+                                .map(|f| Diagnostic {
+                                    range: Range {
+                                        start: Position {
+                                            line: 0,
+                                            character: 0,
+                                        },
+                                        end: Position {
+                                            line: 0,
+                                            character: 0,
+                                        },
+                                    },
+                                    severity: Some(DiagnosticSeverity::WARNING),
+                                    message: format!("Function '{}' is defined but never used", f),
+                                    source: Some("lsp-backend".to_string()),
+                                    ..Default::default()
+                                })
+                                .collect();
+
+                            let uri = Url::from_file_path(file_src).unwrap();
+
+                            self.client
+                                .publish_diagnostics(uri, diagnostics, None)
+                                .await;
+                        }
+                    }
                 }
 
                 // 3) Persistimos a disco (manejo de error no fatal)
@@ -578,53 +692,58 @@ impl LanguageServer for Backend {
                     }
                     Err(e) => {
                         self.client
-                            .log_message(
-                                MessageType::ERROR,
-                                format!("Persist failed: {}", e),
-                            )
+                            .log_message(MessageType::ERROR, format!("Persist failed: {}", e))
                             .await;
                         self.client
-                            .show_message(MessageType::WARNING, "Analysis complete (persist failed)")
+                            .show_message(
+                                MessageType::WARNING,
+                                "Analysis complete (persist failed)",
+                            )
                             .await;
                     }
                 }
 
                 // (Más adelante) acá podríamos reconstruir y enviar el grafo global.
-
             }
             Err(err) => {
                 self.client
-                    .show_message(
-                        MessageType::ERROR,
-                        format!("Analyzer failed: {}", err),
-                    )
+                    .show_message(MessageType::ERROR, format!("Analyzer failed: {}", err))
                     .await;
             }
         }
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        let changes: Vec<(PathBuf, FileChangeType)> = params.changes.into_iter().filter_map(|e| {
-            let typ = e.typ;
-            e.uri.to_file_path().ok().map(|p| (p, typ))
-        }).collect();
+        let changes: Vec<(PathBuf, FileChangeType)> = params
+            .changes
+            .into_iter()
+            .filter_map(|e| {
+                let typ = e.typ;
+                e.uri.to_file_path().ok().map(|p| (p, typ))
+            })
+            .collect();
 
-        let futs: Vec<_> = changes.iter().map(|(p, typ)| self.process_path_change(p, *typ)).collect();
+        let futs: Vec<_> = changes
+            .iter()
+            .map(|(p, typ)| self.process_path_change(p, *typ))
+            .collect();
         futures::future::join_all(futs).await;
     }
 }
 
 #[tokio::main]
 async fn main() {
-  eprintln!("Server is up and running");
+    eprintln!("Server is up and running");
 
-  let (service, socket) = LspService::new(|client| Backend { client,
-    store: RwLock::new(HashMap::new()),
-    connections: RwLock::new(vec![]),
-    workspace_root: RwLock::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
-    ignored_folders: RwLock::new(vec![]),
-  });
-      Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
+    let (service, socket) = LspService::new(|client| Backend {
+        client,
+        store: RwLock::new(HashMap::new()),
+        connections: RwLock::new(vec![]),
+        functions_in_file: RwLock::new(vec![]),
+        workspace_root: RwLock::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        ignored_folders: RwLock::new(vec![]),
+    });
+    Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
         .await;
 }

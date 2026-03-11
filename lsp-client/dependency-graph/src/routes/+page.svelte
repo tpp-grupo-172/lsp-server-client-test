@@ -1,7 +1,7 @@
 <script>
 	import { GraphCache } from "$lib/GraphCache.js";
 	import GraphView from "$lib/GraphView.svelte";
-	import { mockTreeSitterData } from "$lib/mockData";
+	import { mockTreeSitterData } from "$lib/mockDataMidProject";
 	import { onMount } from "svelte";
 
 	/** @type {GraphCache | null} */

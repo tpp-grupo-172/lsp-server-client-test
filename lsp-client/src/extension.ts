@@ -52,15 +52,15 @@ export function activate(context: vscode.ExtensionContext) {
 
   client.onNotification("lsp-server/showFilesToChange", (data: { files: string[]}) => {
     if (isDevelopment) {
-      console.log("Recibido del LSP:", data);
+      console.log("Recibido del LSP 2:", data);
     }
-    files = data.files;
     vscode.window.showInformationMessage(
       `Function was changes, make sure to modify any needed places`,
       'Open files'
     ).then(selection => {
       if (selection === 'Open files') {
-        files.forEach((file: any) => {
+        data.files.forEach((file: any) => {
+          console.log("Recibido del LSP 3:", file);
           vscode.workspace.openTextDocument(file)
             .then(doc => vscode.window.showTextDocument(doc, { preview: false }))
         })
