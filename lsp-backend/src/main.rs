@@ -170,6 +170,7 @@ fn is_ignored(path: &Path, ignored_folders: &[PathBuf]) -> bool {
 
 fn format_for_lsp_message(
     data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>,
+    root: PathBuf
 ) -> Vec<LspFileMessage> {
     data.iter()
         .filter_map(|(path, value)| {
@@ -181,8 +182,18 @@ fn format_for_lsp_message(
             // intentamos deserializar las funciones (podrían ser objetos)
             let functions: Vec<FunctionData> = serde_json::from_value(functions).ok()?;
 
+            eprintln!("path {:?} root {:?}", path.to_string_lossy().to_string(), root);
+
+            let path_string = path.to_str().unwrap_or("");
+            let root_str = root.to_str().unwrap_or("");
+
+            let file_path = path_string.strip_prefix(root_str)
+              .unwrap_or(path_string)
+              .trim_start_matches('/')
+              .to_string();
+
             Some(LspFileMessage {
-                file_name: path.to_string_lossy().to_string(),
+                file_name: file_path,
                 classes: classes.as_array().cloned().unwrap_or_default(),
                 functions,
                 imports: imports.as_array().cloned().unwrap_or_default(),
@@ -254,7 +265,7 @@ impl Backend {
 
         if !py_files.is_empty() {
             let map = self.store.read().await;
-            let message = format_for_lsp_message(map);
+            let message = format_for_lsp_message(map, root.clone());
             self.client
                 .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
                 .await;
@@ -314,7 +325,7 @@ impl Backend {
 
                     // Notifica al cliente con el agregado de este archivo
                     let map = self.store.read().await;
-                    let message = format_for_lsp_message(map);
+                    let message = format_for_lsp_message(map, root.clone());
                     self.client
                         .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
                         .await;
@@ -622,7 +633,7 @@ impl LanguageServer for Backend {
                     let functions_in_file_lock = self.functions_in_file.read().await;
                     let unused_functions: Vec<FunctionsInFiles> =
                         utils::find_unused_functions(&functions_in_file_lock, &current_connections);
-                    let message = format_for_lsp_message(map);
+                    let message = format_for_lsp_message(map, root.clone());
 
                     self.client
                         .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
