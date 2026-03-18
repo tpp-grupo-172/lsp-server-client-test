@@ -10,8 +10,9 @@ import {
 let client: LanguageClient;
 
 let files: any;
+let activePanel: vscode.WebviewPanel | undefined;
+
 export function activate(context: vscode.ExtensionContext) {
-  const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development;
   const serverPath = context.asAbsolutePath(
     path.join("..", "lsp-backend", "target", "debug", "lsp-backend")
   );
@@ -43,20 +44,20 @@ export function activate(context: vscode.ExtensionContext) {
 
   client.start();
 
-  client.onNotification("lsp-server/processedJson", (data: { files: any[] }) => {
-    if (isDevelopment) {
-      console.log("Recibido del LSP:", data);
-    }
-    files = data.files;
-    data.files.forEach(file => {
-      vscode.window.showInformationMessage(
-        `${file.file_name}`
-      );
+  // Register LSP notification handler at activation time so no notifications are missed
+  client.start().then(() => {
+    client.onNotification("lsp-server/processedJson", (data: any) => {
+      files = data.files;
+      if (activePanel) {
+        activePanel.webview.postMessage({
+          command: 'lsp-server/processedJson',
+          files: files
+        });
+      }
     });
   });
 
-  const modeMsg = isDevelopment ? "LSP extension active! (Development Mode)" : "LSP extension active!";
-  vscode.window.showInformationMessage(modeMsg);
+  vscode.window.showInformationMessage("LSP extension active!");
 
   const disposable = vscode.commands.registerCommand("myLspServer.showGraph", async () => {
     const panel = vscode.window.createWebviewPanel(
@@ -66,65 +67,48 @@ export function activate(context: vscode.ExtensionContext) {
       {
         enableScripts: true,
         localResourceRoots: [
-          vscode.Uri.joinPath(context.extensionUri, "dist")
+          context.extensionUri
         ]
       }
     );
 
-    let html: string;
+    activePanel = panel;
+    panel.onDidDispose(() => { activePanel = undefined; });
 
-    if (isDevelopment) {
-      html = getViteDevHtml();
-      vscode.window.showInformationMessage("Cargando grafo desde servidor local (modo dev)");
-    } else {
-      const htmlPath = vscode.Uri.joinPath(context.extensionUri, "dist", "index.html");
-      const htmlFile = await vscode.workspace.fs.readFile(htmlPath);
-      html = htmlFile.toString();
+    const htmlPath = vscode.Uri.joinPath(context.extensionUri, "dist", "index.html");
+    const htmlFile = await vscode.workspace.fs.readFile(htmlPath);
+    let html = htmlFile.toString();
 
-      const baseUri = panel.webview.asWebviewUri(
-        vscode.Uri.joinPath(context.extensionUri, "dist")
-      );
+    const baseUri = panel.webview.asWebviewUri(
+      vscode.Uri.joinPath(context.extensionUri, "dist")
+    );
 
-      // SvelteKit static adapter places assets in /assets/ if appDir: 'assets'
-      html = html.replace(/(href|src)="\/assets\//g, `$1="${baseUri.toString()}/assets/`);
-    }
+    // Rewrite /assets/ paths to full webview URIs
+    html = html.replace(/(href|src)="\/assets\//g, `$1="${baseUri.toString()}/assets/`);
+    html = html.replace(/ crossorigin/g, '');
+
+    const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource};">`;
+    html = html.replace('<head>', `<head>\n    ${csp}`);
 
     panel.webview.html = html;
 
     panel.webview.onDidReceiveMessage(
       message => {
-        console.log('Message from webview:', message);
         if (message.command === 'requestData') {
-          panel.webview.postMessage({
-            command: 'lsp-server/processedJson',
-            files: files
-          });
+          if (files) {
+            panel.webview.postMessage({
+              command: 'lsp-server/processedJson',
+              files: files
+            });
+          }
+          // If files is null, the LSP notification will push data when it arrives
         }
       },
       undefined,
       context.subscriptions
-    )
-
+    );
   });
   context.subscriptions.push(disposable);
-}
-
-function getViteDevHtml(): string {
-  const vitePort = 5173;
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dependency Graph (Dev)</title>
-</head>
-<body>
-  <div id="app"></div>
-  <script type="module" src="http://localhost:${vitePort}/@vite/client"></script>
-  <script type="module" src="http://localhost:${vitePort}/src/main.ts"></script>
-</body>
-</html>`;
 }
 
 export function deactivate(): Thenable<void> | undefined {

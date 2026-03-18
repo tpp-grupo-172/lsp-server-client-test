@@ -18,7 +18,7 @@ export class GraphCache {
    */
   constructor(rawData) {
     const graph = buildGraphFromTreeSitter(rawData);
-
+    console.log(123123)
     /** @type {Map<string, InternalNode>} */
     this._nodes = graph.nodes;
 

@@ -260,7 +260,7 @@
 					'text-background-color': '#1e1e1e',
 					'text-background-opacity': 0.8,
 					'text-background-padding': '2px',
-					'text-margin-y': -10 // desplaza el label arriba de la línea
+					'text-margin-y': -10
 				}
 			},
 
@@ -286,7 +286,7 @@
 				selector: 'edge',
 				style: {
 					'curve-style': 'taxi',
-					'taxi-direction': 'horizontal' // o 'horizontal' o 'auto'
+					'taxi-direction': 'horizontal'
 				}
 			}
 		];
@@ -380,8 +380,6 @@
 						</li>
 					{/if}
 				</ul>
-
-				<!-- Legend -->
 			</aside>
 		{/if}
 	</div>

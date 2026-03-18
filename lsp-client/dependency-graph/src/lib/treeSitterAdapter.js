@@ -19,6 +19,7 @@
  * @returns {{ dirs: string[], filename: string }}
  */
 function parsePath(path) {
+    console.log(path);
     const parts = path.split('/');
     return { dirs: parts.slice(0, -1), filename: parts[parts.length - 1] };
 }
@@ -95,8 +96,9 @@ export function buildGraphFromTreeSitter(data) {
 
     function setFunctionDeclarations(data) {
         for (const file of data.files) {
-            const { dirs, filename } = parsePath(file.path);
-
+            console.log(file);
+            let { dirs, filename } = parsePath(file.file_name);
+            dirs = dirs.slice(-3)
             const parentFolderId = ensureFolders(dirs);
 
             // File node

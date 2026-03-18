@@ -39,8 +39,9 @@ const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
 let client;
+let files;
+let activePanel;
 function activate(context) {
-    const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development;
     const serverPath = context.asAbsolutePath(path.join("..", "lsp-backend", "target", "debug", "lsp-backend"));
     const serverOptions = {
         run: { command: serverPath, transport: node_1.TransportKind.stdio },
@@ -60,72 +61,51 @@ function activate(context) {
     };
     client = new node_1.LanguageClient("myLspServer", "My LSP Server", serverOptions, clientOptions);
     client.start();
-    client.onNotification("lsp-server/processedJson", (data) => {
-        if (isDevelopment) {
-            console.log("Recibido del LSP:", data);
-        }
-        data.files.forEach(file => {
-            vscode.window.showInformationMessage(`${file.file_name}`);
+    // Register LSP notification handler at activation time so no notifications are missed
+    client.start().then(() => {
+        client.onNotification("lsp-server/processedJson", (data) => {
+            files = data.files;
+            if (activePanel) {
+                activePanel.webview.postMessage({
+                    command: 'lsp-server/processedJson',
+                    files: files
+                });
+            }
         });
     });
-    const modeMsg = isDevelopment ? "LSP extension active! (Development Mode)" : "LSP extension active!";
-    vscode.window.showInformationMessage(modeMsg);
+    vscode.window.showInformationMessage("LSP extension active!");
     const disposable = vscode.commands.registerCommand("myLspServer.showGraph", async () => {
         const panel = vscode.window.createWebviewPanel("dependencyGraph", "Dependency Graph", vscode.ViewColumn.One, {
             enableScripts: true,
             localResourceRoots: [
-                vscode.Uri.joinPath(context.extensionUri, "dist")
+                context.extensionUri
             ]
         });
-        let html;
-        if (!isDevelopment) {
-            html = getViteDevHtml();
-            vscode.window.showInformationMessage("Cargando grafo desde servidor local (modo dev)");
-        }
-        else {
-            const htmlPath = vscode.Uri.joinPath(context.extensionUri, "dist", "index.html");
-            const htmlFile = await vscode.workspace.fs.readFile(htmlPath);
-            html = htmlFile.toString();
-            const baseUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, "dist"));
-            html = html.replace(/\/assets\//g, `${baseUri.toString()}/assets/`);
-        }
+        activePanel = panel;
+        panel.onDidDispose(() => { activePanel = undefined; });
+        const htmlPath = vscode.Uri.joinPath(context.extensionUri, "dist", "index.html");
+        const htmlFile = await vscode.workspace.fs.readFile(htmlPath);
+        let html = htmlFile.toString();
+        const baseUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, "dist"));
+        // Rewrite /assets/ paths to full webview URIs
+        html = html.replace(/(href|src)="\/assets\//g, `$1="${baseUri.toString()}/assets/`);
+        html = html.replace(/ crossorigin/g, '');
+        const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource};">`;
+        html = html.replace('<head>', `<head>\n    ${csp}`);
         panel.webview.html = html;
         panel.webview.onDidReceiveMessage(message => {
-            console.log('Message from webview:', message);
             if (message.command === 'requestData') {
-                panel.webview.postMessage({
-                    command: 'dataResponse',
-                    data: { nodes: [], edges: [] }
-                });
+                if (files) {
+                    panel.webview.postMessage({
+                        command: 'lsp-server/processedJson',
+                        files: files
+                    });
+                }
+                // If files is null, the LSP notification will push data when it arrives
             }
         }, undefined, context.subscriptions);
-        // client.onNotification("lsp-server/customJson", (data) => {
-        //   if (isDevelopment) {
-        //     console.log("Recibido del LSP:", data);
-        //   }
-        //   panel.webview.postMessage({
-        //     command: 'lspData',
-        //     data: data
-        //   });
-        // });
     });
     context.subscriptions.push(disposable);
-}
-function getViteDevHtml() {
-    const vitePort = 5173;
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dependency Graph (Dev)</title>
-</head>
-<body>
-  <div id="app"></div>
-  <script type="module" src="http://localhost:${vitePort}/@vite/client"></script>
-  <script type="module" src="http://localhost:${vitePort}/src/main.ts"></script>
-</body>
-</html>`;
 }
 function deactivate() {
     if (!client) {
