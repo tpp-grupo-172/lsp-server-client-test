@@ -17,6 +17,8 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
+use crate::utils::FileWarn;
+
 mod utils;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -37,6 +39,7 @@ struct LspFileMessage {
 struct Connections {
     file_src: String,
     file_use: String,
+    line: i64,
     function: String,
 }
 
@@ -74,7 +77,7 @@ struct ProcessedJsonPayload {
 
 #[derive(Serialize, Debug, Deserialize)]
 struct ShowFilesToChangePayload {
-    files: Vec<String>,
+    files: Vec<FileWarn>,
 }
 
 impl Notification for ProcessedJson {
@@ -477,12 +480,17 @@ impl Backend {
                         .get("import_name")
                         .and_then(|v| v.as_str())
                         .unwrap_or("<sin nombre>");
+                    let line = functions_call_in_class
+                        .get("line")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
 
                     if let Some(path) = imports_hashmap.get(import_name) {
                         let cloned_path = path.clone();
                         let connection = Connections {
                             file_src: cloned_path,
                             file_use: path_string.clone(),
+                            line: line,
                             function: name.to_string(),
                         };
 
@@ -513,12 +521,17 @@ impl Backend {
                     .get("import_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("<sin nombre>");
+                let line = functions_call
+                    .get("line")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
 
                 if let Some(path) = imports_hashmap.get(import_name) {
                     let cloned_path = path.clone();
                     let connection = Connections {
                         file_src: cloned_path,
                         file_use: path_string.clone(),
+                        line: line,
                         function: name.to_string(),
                     };
 

@@ -75,8 +75,13 @@ function activate(context) {
             if (selection === 'Open files') {
                 data.files.forEach((file) => {
                     console.log("Recibido del LSP 3:", file);
-                    vscode.workspace.openTextDocument(file)
-                        .then(doc => vscode.window.showTextDocument(doc, { preview: false }));
+                    vscode.workspace.openTextDocument(file.path)
+                        .then(doc => vscode.window.showTextDocument(doc, { preview: false }))
+                        .then(editor => {
+                        const position = new vscode.Position(file.line - 1, 0);
+                        editor.selection = new vscode.Selection(position, position);
+                        editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+                    });
                 });
             }
         });

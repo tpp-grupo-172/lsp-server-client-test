@@ -50,7 +50,7 @@ export function activate(context: vscode.ExtensionContext) {
     files = data.files;
   });
 
-  client.onNotification("lsp-server/showFilesToChange", (data: { files: string[]}) => {
+  client.onNotification("lsp-server/showFilesToChange", (data: { files: Array<{ path: string, line: number }>}) => {
     if (isDevelopment) {
       console.log("Recibido del LSP 2:", data);
     }
@@ -59,10 +59,18 @@ export function activate(context: vscode.ExtensionContext) {
       'Open files'
     ).then(selection => {
       if (selection === 'Open files') {
-        data.files.forEach((file: any) => {
+        data.files.forEach((file: { path: string, line: number }) => {
           console.log("Recibido del LSP 3:", file);
-          vscode.workspace.openTextDocument(file)
+          vscode.workspace.openTextDocument(file.path)
             .then(doc => vscode.window.showTextDocument(doc, { preview: false }))
+              .then(editor => {
+                const position = new vscode.Position(file.line - 1, 0);
+                editor.selection = new vscode.Selection(position, position);
+                editor.revealRange(
+                  new vscode.Range(position, position),
+                  vscode.TextEditorRevealType.InCenter
+                );
+              });
         })
       }
     });

@@ -1,4 +1,5 @@
 use crate::{Connections, FunctionsInFiles};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -25,6 +26,12 @@ pub enum SignatureChange {
     ReturnTypeChanged { old: String, new: String },
     ParameterAdded(String),
     ParameterRemoved(String),
+}
+
+#[derive(Serialize, Debug, Deserialize)]
+pub struct FileWarn {
+  path: String,
+  line: i64
 }
 
 fn extract_functions(file_value: &Value) -> Vec<&Value> {
@@ -256,7 +263,7 @@ pub fn affected_files_by_change(
     changes: &[FunctionChange],
     connections: &[Connections],
     file_src: &PathBuf,
-) -> HashMap<String, Vec<String>> {
+) -> HashMap<String, Vec<FileWarn>> {
     let path_str = file_src.to_str().unwrap().to_string();
     let changed_functions: Vec<&str> = changes
         .iter()
@@ -268,7 +275,7 @@ pub fn affected_files_by_change(
         })
         .collect();
 
-    let mut result: HashMap<String, Vec<String>> = HashMap::new();
+    let mut result: HashMap<String, Vec<FileWarn>> = HashMap::new();
 
     for conn in connections
         .iter()
@@ -277,7 +284,7 @@ pub fn affected_files_by_change(
         result
             .entry(conn.function.clone())
             .or_default()
-            .push(conn.file_use.clone());
+            .push(FileWarn { path: conn.file_use.clone(), line: conn.line.clone() } );
     }
 
     result
