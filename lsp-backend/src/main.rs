@@ -122,6 +122,10 @@ fn hash_path(path: &Path) -> String {
     hash.to_hex().to_string()
 }
 
+fn hash_content(content: &[u8]) -> String {
+    blake3::hash(content).to_hex().to_string()
+}
+
 // Helpers de escritura atómica
 async fn write_json_atomic(target_json_path: &Path, json: &Value) -> std::io::Result<()> {
     let tmp_path = target_json_path.with_extension("json.tmp");
@@ -141,13 +145,59 @@ async fn write_json_atomic(target_json_path: &Path, json: &Value) -> std::io::Re
     fs::rename(&tmp_path, target_json_path).await
 }
 
-fn wrap_with_metadata(original_path: &Path, raw: Value) -> Value {
+fn wrap_with_metadata(original_path: &Path, raw: Value, content_hash: &str) -> Value {
     json!({
         "schema_version": 1,
         "original_path": original_path.to_string_lossy(),
         "analyzed_at": chrono::Utc::now().to_rfc3339(),
+        "content_hash": content_hash,
         "data": raw
     })
+}
+
+/// Valida una entrada de caché JSON y extrae el campo `data` si es válida.
+/// Retorna `None` si el schema, el path o el content_hash no coinciden.
+fn validate_cache_entry(
+    cached: &Value,
+    original_path: &Path,
+    current_content_hash: &str,
+) -> Option<Value> {
+    if cached.get("schema_version")?.as_u64()? != 1 {
+        return None;
+    }
+    if cached.get("original_path")?.as_str()? != original_path.to_string_lossy().as_ref() {
+        return None;
+    }
+    if cached.get("content_hash")?.as_str()? != current_content_hash {
+        return None;
+    }
+    Some(cached.get("data")?.clone())
+}
+
+/// Recorre `cache_dir` y elimina los `.json` cuyo `original_path` ya no existe en disco.
+async fn cleanup_orphan_entries_in(cache_dir: &Path) {
+    let mut read_dir = match fs::read_dir(cache_dir).await {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let entry_path = entry.path();
+        if entry_path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(&entry_path).await else {
+            continue;
+        };
+        let Ok(cached) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some(op) = cached.get("original_path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !Path::new(op).exists() {
+            let _ = fs::remove_file(&entry_path).await;
+        }
+    }
 }
 
 async fn load_ignore_list(workspace_root: &Path) -> Vec<PathBuf> {
@@ -214,6 +264,8 @@ impl Backend {
         let root = { self.workspace_root.read().await.clone() };
         let ignored = { self.ignored_folders.read().await.clone() };
 
+        self.cleanup_orphan_cache_entries().await;
+
         // Recorrido iterativo del workspace (evita async recursion)
         let mut dirs: Vec<PathBuf> = vec![root.clone()];
         let mut py_files: Vec<PathBuf> = Vec::new();
@@ -249,6 +301,21 @@ impl Backend {
             .await;
 
         for path in &py_files {
+            let file_bytes = match fs::read(path).await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let content_hash = hash_content(&file_bytes);
+
+            // Intentar warm-up desde caché
+            if let Some(cached_value) = self.try_load_from_cache(path, &content_hash).await {
+                self.upsert_store_value(path, &cached_value).await;
+                self.save_function_reference(path, &cached_value).await;
+                self.save_functions(path, &cached_value).await;
+                continue;
+            }
+
+            // Cache miss: analizar desde cero
             let path_clone = path.clone();
             let root_clone = root.clone();
             let result =
@@ -257,9 +324,9 @@ impl Backend {
                 let value: Value = serde_json::from_str(&json_str)
                     .unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
                 self.upsert_store_value(path, &value).await;
-                self.save_function_reference(&path, &value).await;
-                self.save_functions(&path, &value).await;
-                let _ = self.persist_analysis_json(path, &value).await;
+                self.save_function_reference(path, &value).await;
+                self.save_functions(path, &value).await;
+                let _ = self.persist_analysis_json(path, &value, &content_hash).await;
             }
         }
 
@@ -331,7 +398,9 @@ impl Backend {
                         .await;
 
                     // Persiste a disco (ignora error no fatal)
-                    let _ = self.persist_analysis_json(path, &value).await;
+                    let file_bytes = fs::read(path).await.unwrap_or_default();
+                    let content_hash = hash_content(&file_bytes);
+                    let _ = self.persist_analysis_json(path, &value, &content_hash).await;
                 }
             }
             FileChangeType::DELETED => {
@@ -513,6 +582,7 @@ impl Backend {
         &self,
         original_path: &Path,
         raw_json: &Value,
+        content_hash: &str,
     ) -> std::io::Result<PathBuf> {
         // 1) Leemos el workspace root guardado en initialize
         let root = { self.workspace_root.read().await.clone() };
@@ -526,10 +596,33 @@ impl Backend {
         let target = base.join(format!("{file_id}.json"));
 
         // 4) Envolvemos con metadatos y escribimos atómico
-        let wrapped = wrap_with_metadata(original_path, raw_json.clone());
+        let wrapped = wrap_with_metadata(original_path, raw_json.clone(), content_hash);
         write_json_atomic(&target, &wrapped).await?;
 
         Ok(target)
+    }
+
+    /// Intenta cargar el análisis desde caché en disco.
+    /// Retorna `Some(data)` si el caché existe y el `content_hash` coincide con el del archivo actual.
+    async fn try_load_from_cache(
+        &self,
+        original_path: &Path,
+        current_content_hash: &str,
+    ) -> Option<Value> {
+        let root = { self.workspace_root.read().await.clone() };
+        let base = cache_root_for_workspace(&root);
+        let cache_path = base.join(format!("{}.json", hash_path(original_path)));
+
+        let raw = fs::read_to_string(&cache_path).await.ok()?;
+        let cached: Value = serde_json::from_str(&raw).ok()?;
+        validate_cache_entry(&cached, original_path, current_content_hash)
+    }
+
+    /// Elimina entradas de caché cuyo `original_path` ya no existe en disco.
+    async fn cleanup_orphan_cache_entries(&self) {
+        let root = { self.workspace_root.read().await.clone() };
+        let base = cache_root_for_workspace(&root);
+        cleanup_orphan_entries_in(&base).await;
     }
 }
 
@@ -689,7 +782,9 @@ impl LanguageServer for Backend {
                 }
 
                 // 3) Persistimos a disco (manejo de error no fatal)
-                match self.persist_analysis_json(&path, &value).await {
+                let file_bytes = fs::read(&path).await.unwrap_or_default();
+                let content_hash = hash_content(&file_bytes);
+                match self.persist_analysis_json(&path, &value, &content_hash).await {
                     Ok(written) => {
                         self.client
                             .log_message(
@@ -757,4 +852,181 @@ async fn main() {
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // ── hash_content ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn hash_content_is_deterministic() {
+        let h1 = hash_content(b"def foo(): pass");
+        let h2 = hash_content(b"def foo(): pass");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn hash_content_differs_on_different_input() {
+        let h1 = hash_content(b"def foo(): pass");
+        let h2 = hash_content(b"def bar(): pass");
+        assert_ne!(h1, h2);
+    }
+
+    // ── wrap_with_metadata ────────────────────────────────────────────────────
+
+    #[test]
+    fn wrap_with_metadata_includes_all_fields() {
+        let path = Path::new("/workspace/module.py");
+        let data = serde_json::json!({ "functions": [] });
+        let hash = "abc123";
+        let wrapped = wrap_with_metadata(path, data.clone(), hash);
+
+        assert_eq!(wrapped["schema_version"], 1);
+        assert_eq!(wrapped["original_path"], "/workspace/module.py");
+        assert_eq!(wrapped["content_hash"], hash);
+        assert_eq!(wrapped["data"], data);
+        assert!(wrapped["analyzed_at"].is_string());
+    }
+
+    // ── validate_cache_entry ──────────────────────────────────────────────────
+
+    fn make_cached(path: &str, content_hash: &str, schema_version: u64) -> Value {
+        serde_json::json!({
+            "schema_version": schema_version,
+            "original_path": path,
+            "content_hash": content_hash,
+            "analyzed_at": "2026-01-01T00:00:00Z",
+            "data": { "functions": [], "classes": [], "imports": [] }
+        })
+    }
+
+    #[test]
+    fn validate_cache_entry_returns_data_on_valid_entry() {
+        let path = Path::new("/workspace/foo.py");
+        let hash = hash_content(b"def foo(): pass");
+        let cached = make_cached("/workspace/foo.py", &hash, 1);
+
+        let result = validate_cache_entry(&cached, path, &hash);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), cached["data"]);
+    }
+
+    #[test]
+    fn validate_cache_entry_rejects_wrong_content_hash() {
+        let path = Path::new("/workspace/foo.py");
+        let stored_hash = hash_content(b"def foo(): pass");
+        let current_hash = hash_content(b"def foo(): return 42");
+        let cached = make_cached("/workspace/foo.py", &stored_hash, 1);
+
+        assert!(validate_cache_entry(&cached, path, &current_hash).is_none());
+    }
+
+    #[test]
+    fn validate_cache_entry_rejects_wrong_path() {
+        let hash = hash_content(b"def foo(): pass");
+        let cached = make_cached("/workspace/foo.py", &hash, 1);
+        let different_path = Path::new("/workspace/bar.py");
+
+        assert!(validate_cache_entry(&cached, different_path, &hash).is_none());
+    }
+
+    #[test]
+    fn validate_cache_entry_rejects_wrong_schema_version() {
+        let path = Path::new("/workspace/foo.py");
+        let hash = hash_content(b"def foo(): pass");
+        let cached = make_cached("/workspace/foo.py", &hash, 99);
+
+        assert!(validate_cache_entry(&cached, path, &hash).is_none());
+    }
+
+    // ── cleanup_orphan_entries_in ─────────────────────────────────────────────
+
+    // ── ciclo completo: persistir → warm-up → invalidar ──────────────────────
+
+    #[tokio::test]
+    async fn full_cache_cycle_persist_warmup_invalidate() {
+        let workspace = tempfile::tempdir().unwrap();
+        let cache_dir = workspace.path().join(".lsp-analysis").join("files");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Crear un archivo .py real en el workspace
+        let py_path = workspace.path().join("module.py");
+        let original_content = b"def foo(): pass\n";
+        tokio::fs::write(&py_path, original_content).await.unwrap();
+
+        let analysis_data = serde_json::json!({
+            "functions": [{ "name": "foo", "parameters": [], "return_type": null, "function_calls": [] }],
+            "classes": [],
+            "imports": []
+        });
+
+        // 1) Persistir en caché
+        let content_hash = hash_content(original_content);
+        let file_id = hash_path(&py_path);
+        let cache_file = cache_dir.join(format!("{file_id}.json"));
+        let wrapped = wrap_with_metadata(&py_path, analysis_data.clone(), &content_hash);
+        write_json_atomic(&cache_file, &wrapped).await.unwrap();
+
+        assert!(cache_file.exists(), "el archivo de caché debe existir");
+
+        // 2) Warm-up: mismo contenido → cache hit, retorna los datos originales
+        let hit = validate_cache_entry(&wrapped, &py_path, &content_hash);
+        assert!(hit.is_some(), "debe ser cache hit con el mismo hash");
+        assert_eq!(hit.unwrap(), analysis_data);
+
+        // 3) El archivo cambia en disco → cache miss
+        let new_content = b"def foo(): return 42\n";
+        let new_hash = hash_content(new_content);
+        let miss = validate_cache_entry(&wrapped, &py_path, &new_hash);
+        assert!(miss.is_none(), "debe ser cache miss con hash diferente");
+
+        // 4) Después de re-analizar, el caché se actualiza y vuelve a ser un hit
+        let new_data = serde_json::json!({
+            "functions": [{ "name": "foo", "parameters": [], "return_type": "int", "function_calls": [] }],
+            "classes": [],
+            "imports": []
+        });
+        let new_wrapped = wrap_with_metadata(&py_path, new_data.clone(), &new_hash);
+        write_json_atomic(&cache_file, &new_wrapped).await.unwrap();
+
+        let hit_after_update = validate_cache_entry(&new_wrapped, &py_path, &new_hash);
+        assert!(hit_after_update.is_some(), "debe ser cache hit tras actualizar el caché");
+        assert_eq!(hit_after_update.unwrap(), new_data);
+    }
+
+    // ── cleanup_orphan_entries_in ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cleanup_removes_orphan_json_keeps_valid_ones() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache_path = cache_dir.path();
+
+        // Archivo Python real (existe en disco)
+        let real_py = tempfile::NamedTempFile::new().unwrap();
+        let real_py_path = real_py.path().to_string_lossy().to_string();
+
+        // JSON con original_path que existe → debe conservarse
+        let valid_cache = cache_path.join("valid.json");
+        let valid_entry = serde_json::json!({ "original_path": real_py_path });
+        std::fs::File::create(&valid_cache)
+            .unwrap()
+            .write_all(serde_json::to_vec(&valid_entry).unwrap().as_slice())
+            .unwrap();
+
+        // JSON con original_path que NO existe → debe eliminarse
+        let orphan_cache = cache_path.join("orphan.json");
+        let orphan_entry = serde_json::json!({ "original_path": "/no/existe/nunca.py" });
+        std::fs::File::create(&orphan_cache)
+            .unwrap()
+            .write_all(serde_json::to_vec(&orphan_entry).unwrap().as_slice())
+            .unwrap();
+
+        cleanup_orphan_entries_in(cache_path).await;
+
+        assert!(valid_cache.exists(), "el JSON válido debe conservarse");
+        assert!(!orphan_cache.exists(), "el JSON huérfano debe eliminarse");
+    }
 }
