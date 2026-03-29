@@ -3,8 +3,9 @@
 	import GraphView from "./lib/GraphView.svelte";
 	import { GraphCache } from "./lib/GraphCache.js";
 	import { lspData, sendMessage } from "./lib/vscode";
-	import {mockTreeSitterData} from "./lib/mockData";
-	//import {mockTreeSitterData} from "./lib/mockDataMidProject";
+	//import {mockTreeSitterData} from "./lib/mockData";
+	import {mockTreeSitterData} from "./lib/mockDataMidProject";
+	/** @type {import('./lib/GraphCache').GraphCache | null} */
 	let graphCache = null;
 
 	onMount(() => {

@@ -13,6 +13,15 @@
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
+ * Escapes characters that are special in CSS selectors used by Cytoscape.
+ * @param {string} str
+ * @returns {string}
+ */
+function sanitizeId(str) {
+    return str.replace(/[\[\]#.()\{\}\|^$*+?\\/"'`~!@%&=<>,; ]/g, '_');
+}
+
+/**
  * Splits "src/components/Button.py" into
  * { dirs: ["src", "components"], filename: "Button.py" }
  * @param {string} path
@@ -34,6 +43,9 @@ function parsePath(path) {
  * @returns {import('./protocol').InternalGraph}
  */
 export function buildGraphFromTreeSitter(data) {
+    if (!data || !Array.isArray(data.files)) {
+        throw new Error('buildGraphFromTreeSitter: data.files debe ser un array');
+    }
     /** @type {Map<string, import('./protocol').InternalNode>} */
     const nodes = new Map();
 
@@ -66,13 +78,14 @@ export function buildGraphFromTreeSitter(data) {
     function link(parentId, childId, edgeType) {
         addEdge({ id: `${edgeType}::${parentId}->${childId}`, source: parentId, target: childId, type: edgeType });
 
-        // Null-safe: ensure the array exists before pushing
-        if (!childrenMap.has(parentId)) {
-            childrenMap.set(parentId, []);
+        // Only structural edges define the tree hierarchy
+        if (edgeType === 'contains' || edgeType === 'declares') {
+            if (!childrenMap.has(parentId)) {
+                childrenMap.set(parentId, []);
+            }
+            /** @type {string[]} */ (childrenMap.get(parentId)).push(childId);
+            parentMap.set(childId, parentId);
         }
-    /** @type {string[]} */ (childrenMap.get(parentId)).push(childId);
-
-        parentMap.set(childId, parentId);
     }
 
     /**
@@ -95,6 +108,7 @@ export function buildGraphFromTreeSitter(data) {
         return currentId;
     }
 
+    /** @param {import('./protocol').TreeSitterData} data */
     function setFunctionDeclarations(data) {
         for (const file of data.files) {
             console.log(file);
@@ -107,7 +121,7 @@ export function buildGraphFromTreeSitter(data) {
 
             // Function / symbol nodes
             for (const fn of file.functions) {
-                const fnId = `${file.path}::${fn.name}`;
+                const fnId = `${sanitizeId(file.path)}::${sanitizeId(fn.name)}`;
                 addNode({
                     id: fnId,
                     label: fn.name,
@@ -120,12 +134,12 @@ export function buildGraphFromTreeSitter(data) {
 
             // Class nodes and their methods
             for (const cls of (file.classes ?? [])) {
-                const classId = `${file.path}::${cls.name}`;
+                const classId = `${sanitizeId(file.path)}::${sanitizeId(cls.name)}`;
                 addNode({ id: classId, label: cls.name, type: 'class', path: file.path });
                 link(file.path, classId, 'declares');
 
                 for (const method of (cls.methods ?? [])) {
-                    const methodId = `${classId}::${method.name}`;
+                    const methodId = `${classId}::${sanitizeId(method.name)}`;
                     addNode({
                         id: methodId,
                         label: method.name,
@@ -138,9 +152,11 @@ export function buildGraphFromTreeSitter(data) {
             }
         }
     }
+    /** @param {import('./protocol').TreeSitterData} data */
     function setLinkImports(data) {
         for (const file of data.files) {
             for (const importedFile of file.imports) {
+                if (!importedFile.path) continue;
                 const importId = importedFile.path;
                 const importedNode = nodes.get(importId)
                 if (!importedNode) continue;
@@ -152,16 +168,17 @@ export function buildGraphFromTreeSitter(data) {
         }
     }
 
+    /** @param {import('./protocol').TreeSitterData} data */
     function setLinkCalls(data) {
         for (const file of data.files) {
             for (const fn of file.functions) {
                 for (const call of fn.function_calls) {
                     for (const importedFile of file.imports) {
-                        const fnId = `${importedFile.path}::${call.name}`;
+                        const fnId = `${sanitizeId(importedFile.path)}::${sanitizeId(call.name)}`;
 
                         const node = nodes.get(fnId)
                         if (!node) continue;
-                        const currentFnId = `${file.path}::${fn.name}`;
+                        const currentFnId = `${sanitizeId(file.path)}::${sanitizeId(fn.name)}`;
                         const pathNode = nodes.get(currentFnId)
                         if (!pathNode) continue;
 

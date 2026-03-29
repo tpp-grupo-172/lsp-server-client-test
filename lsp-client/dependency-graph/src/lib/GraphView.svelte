@@ -2,6 +2,7 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
 	import cytoscape from 'cytoscape';
+	// @ts-ignore -- no type declarations for cytoscape-cose-bilkent
 	import coseBilkent from 'cytoscape-cose-bilkent';
 	import './GraphView.css';
 
@@ -11,6 +12,7 @@
 	export let graphCache;
 
 	// ── DOM refs ────────────────────────────────────────────────────────────────
+	/** @type {HTMLElement} */
 	let container;
 
 	// ── State ───────────────────────────────────────────────────────────────────
@@ -47,6 +49,7 @@
 	});
 
 	// ── Navigation helpers ───────────────────────────────────────────────────────
+	/** @param {string} folderId */
 	function enterFolder(folderId) {
 		navigationStack = [...navigationStack, folderId];
 		renderLevel(folderId);
@@ -59,6 +62,7 @@
 		renderLevel(next[next.length - 1]);
 	}
 
+	/** @param {number} index */
 	function jumpToBreadcrumb(index) {
 		if (index === navigationStack.length - 1) return; // already here
 		const next = navigationStack.slice(0, index + 1);
@@ -66,7 +70,49 @@
 		renderLevel(next[next.length - 1]);
 	}
 
+	// ── Overlap resolution ──────────────────────────────────────────────────────
+	/** @param {import('cytoscape').Core} cyInstance */
+	function resolveAllOverlaps(cyInstance) {
+		const MARGIN = 10;
+		const topLevel = cyInstance.nodes(':orphan');
+
+		let changed = true;
+		let passes = 0;
+
+		while (changed && passes < 20) {
+			changed = false;
+			passes++;
+
+			topLevel.forEach((node) => {
+				topLevel.not(node).forEach((other) => {
+					const bb = node.boundingBox();
+					const obb = other.boundingBox();
+
+					const overlapX = Math.min(bb.x2, obb.x2) - Math.max(bb.x1, obb.x1) + MARGIN;
+					const overlapY = Math.min(bb.y2, obb.y2) - Math.max(bb.y1, obb.y1) + MARGIN;
+
+					if (overlapX > 0 && overlapY > 0) {
+						const nodeCx = (bb.x1 + bb.x2) / 2;
+						const otherCx = (obb.x1 + obb.x2) / 2;
+						const nodeCy = (bb.y1 + bb.y2) / 2;
+						const otherCy = (obb.y1 + obb.y2) / 2;
+
+						if (overlapX <= overlapY) {
+							const dir = nodeCx >= otherCx ? 1 : -1;
+							node.position('x', node.position('x') + dir * overlapX);
+						} else {
+							const dir = nodeCy >= otherCy ? 1 : -1;
+							node.position('y', node.position('y') + dir * overlapY);
+						}
+						changed = true;
+					}
+				});
+			});
+		}
+	}
+
 	// ── Core render ──────────────────────────────────────────────────────────────
+	/** @param {string} folderId */
 	function renderLevel(folderId) {
 		selectedNode = null;
 
@@ -80,37 +126,38 @@
 
 		const { nodes, edges } = graphCache.getLevelElements(folderId);
 
-		cy = cytoscape({
+		cy = cytoscape(/** @type {any} */ ({
 			container,
 			elements: { nodes, edges },
 			style: buildStyle(),
 			userZoomingEnabled: true,
 			userPanningEnabled: true,
 			boxSelectionEnabled: false,
-			minZoom: 0.3,
-			maxZoom: 2.5,
+			minZoom: 0.1,
+			maxZoom: 4,
 			zoom: 1,
 			zoomingEnabled: true,
 			pixelRatio: 1,
 			motionBlur: true,
-			wheelSensitivity: 0.2
-		});
+			wheelSensitivity: 0.5
+		}));
 
-		cy.layout({
+		cy.layout(/** @type {any} */ ({
 			name: 'cose-bilkent',
 			nodeDimensionsIncludeLabels: true,
-			edgeElasticity: 0.45,
-			nodeRepulsion: 1000, // menos separación
-			idealEdgeLength: 80, // edges más cortos
-			nestingFactor: 0.1, // menos expansión de compounds
+			edgeElasticity: 0.08,
+			nodeRepulsion: 4500,
+			idealEdgeLength: 120,
+			nestingFactor: 0.1,
 			gravity: 0.15, // más compactación
 			numIter: 2500,
 			tile: true,
 			padding: 50,
 			randomize: false,
 			animate: false
-		}).run();
+		})).run();
 
+		resolveAllOverlaps(cy);
 		cy.fit("60");
 
 		// ── Event handlers ─────────────────────────────────────────────────────────
@@ -157,9 +204,41 @@
 		cy.on('mouseout', 'node[type="function"], node[type="method"]', (e) => {
 			e.target.style({ 'border-color': null });
 		});
+
+		// Prevent node overlap: after drag, push node away from any overlapping sibling
+		cy.on('free', 'node', (e) => {
+			const node = e.target;
+			const MARGIN = 10;
+			if (!cy) return;
+			const others = cy.nodes().not(node).not(node.ancestors()).not(node.descendants());
+
+			others.forEach((other) => {
+				const bb = node.boundingBox();
+				const obb = other.boundingBox();
+
+				const overlapX = Math.min(bb.x2, obb.x2) - Math.max(bb.x1, obb.x1) + MARGIN;
+				const overlapY = Math.min(bb.y2, obb.y2) - Math.max(bb.y1, obb.y1) + MARGIN;
+
+				if (overlapX > 0 && overlapY > 0) {
+					const nodeCx = (bb.x1 + bb.x2) / 2;
+					const otherCx = (obb.x1 + obb.x2) / 2;
+					const nodeCy = (bb.y1 + bb.y2) / 2;
+					const otherCy = (obb.y1 + obb.y2) / 2;
+
+					if (overlapX <= overlapY) {
+						const dir = nodeCx >= otherCx ? 1 : -1;
+						node.position('x', node.position('x') + dir * overlapX);
+					} else {
+						const dir = nodeCy >= otherCy ? 1 : -1;
+						node.position('y', node.position('y') + dir * overlapY);
+					}
+				}
+			});
+		});
 	}
 
 	// ── Cytoscape stylesheet ─────────────────────────────────────────────────────
+	/** @returns {any[]} */
 	function buildStyle() {
 		return [
 			// ── Folder nodes ────────────────────────────────────────────────────────
@@ -167,8 +246,8 @@
 				selector: 'node[type="folder"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 130,
-					height: 90,
+					width: 200,
+					height: 200,
 					'background-color': '#2a2618',
 					'border-width': 2,
 					'border-color': '#e5c07b',
@@ -189,6 +268,8 @@
 				selector: 'node[type="file"]',
 				style: {
 					shape: 'round-rectangle',
+					width: 200,
+					height: 200,
 					'background-color': '#12243a',
 					'background-opacity': 0.85,
 					'border-width': 2,
@@ -202,7 +283,7 @@
 					'font-family': '"Consolas", "Menlo", monospace',
 					color: '#569cd6',
 					'font-weight': 'bold',
-					padding: '22px',
+					padding: '8px',
 					cursor: 'pointer'
 				}
 			},
@@ -210,12 +291,14 @@
 				selector: 'node[type="class"]',
 				style: {
 					shape: 'round-rectangle',
+					width: 200,
+					height: 200,
 					'background-color': '#25466e',
 					'background-opacity': 0.6,
 					'border-width': 2,
 					'border-color': '#6fb0e0',
 
-					label: 'data(displayLabel)',
+					label: 'data(label)',
 					'text-valign': 'top',
 					'text-halign': 'center',
 					'text-margin-y': -10,
@@ -223,7 +306,7 @@
 					'font-family': '"Consolas", "Menlo", monospace',
 					color: '#569cd6',
 					'font-weight': 'bold',
-					padding: '22px',
+					padding: '8px',
 					cursor: 'pointer'
 				}
 			},
@@ -233,15 +316,16 @@
 				selector: 'node[type="function"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 110,
-					height: 36,
+					width: 200,
+					height: 200,
+					padding: '6px',
 					'background-color': '#0d2b25',
 					'border-width': 1.5,
 					'border-color': '#4ec9b0',
 
 					label: 'data(label)',
 					'text-valign': 'center',
-					'font-size': 11,
+					'font-size': 10,
 					'font-family': '"Consolas", "Menlo", monospace',
 					color: '#4ec9b0',
 					cursor: 'pointer'
@@ -253,15 +337,16 @@
 				selector: 'node[type="method"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 110,
-					height: 36,
+					width: 200,
+					height: 200,
+					padding: '6px',
 					'background-color': '#29271a',
 					'border-width': 1.5,
 					'border-color': '#dcdcaa',
 
 					label: 'data(label)',
 					'text-valign': 'center',
-					'font-size': 11,
+					'font-size': 10,
 					'font-family': '"Consolas", "Menlo", monospace',
 					color: '#dcdcaa',
 					cursor: 'pointer'
@@ -326,6 +411,14 @@
 		method: '#dcdcaa',
 		class: '#c586c0'
 	};
+
+	/** @param {string | undefined} path */
+	function shortPath(path) {
+		if (!path) return '';
+		const parts = path.split('/');
+		if (parts.length <= 2) return path;
+		return '.../' + parts.slice(-2).join('/');
+	}
 </script>
 
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
@@ -406,6 +499,25 @@
 						</li>
 					{/if}
 				</ul>
+
+				{#if selectedNode.type === 'file'}
+					{@const importGroups = graphCache.getImportedFunctionsForFile(selectedNode.id)}
+					{#if importGroups.length > 0}
+						<p class="imports-title">Funciones importadas</p>
+						<div class="imports-list">
+							{#each importGroups as { fileNode, fns }}
+								<div class="import-group">
+									<p class="import-file" title={fileNode.path}>{shortPath(fileNode.path)}</p>
+									<ul class="import-fn-list">
+										{#each fns as fn}
+											<li class="import-fn">{fn.label}</li>
+										{/each}
+									</ul>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				{/if}
 			</aside>
 		{/if}
 	</div>

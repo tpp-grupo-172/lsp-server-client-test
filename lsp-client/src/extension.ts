@@ -1,3 +1,4 @@
+import * as crypto from "crypto";
 import * as path from "path";
 import * as vscode from "vscode";
 import {
@@ -100,11 +101,13 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.Uri.joinPath(context.extensionUri, "dist")
     );
 
-    // Rewrite /assets/ paths to full webview URIs
+    const nonce = crypto.randomBytes(16).toString("base64url");
+
     html = html.replace(/(href|src)="\/assets\//g, `$1="${baseUri.toString()}/assets/`);
     html = html.replace(/ crossorigin/g, '');
+    html = html.replace(/<script/g, `<script nonce="${nonce}"`);
 
-    const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource};">`;
+    const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource};">`;
     html = html.replace('<head>', `<head>\n    ${csp}`);
 
     panel.webview.html = html;

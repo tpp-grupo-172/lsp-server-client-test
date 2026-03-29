@@ -23,17 +23,19 @@ export const vscode =
 if (typeof window !== 'undefined') {
   window.addEventListener('message', (event) => {
     const message = event.data;
+    if (!message || typeof message.command !== 'string') return;
     switch (message.command) {
       case 'lsp-server/processedJson':
+        if (!Array.isArray(message.files)) return;
         lspData.set({ files: message.files });
         break;
     }
   });
 }
 
-export function sendMessage(command: string, data?: any) {
+export function sendMessage(command: string, data?: Record<string, unknown>) {
   if (vscode) {
-    vscode.postMessage({ command, ...data });
+    vscode.postMessage({ ...data, command });
   } else {
     console.warn('⚠️ VSCode API no disponible');
   }

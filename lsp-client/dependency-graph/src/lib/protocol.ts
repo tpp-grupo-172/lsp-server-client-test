@@ -31,7 +31,7 @@ export interface FileData {
 
 export interface ImportData {
   name: string;
-  path: string;
+  path: string | null;
 }
 
 export interface ClassData {
@@ -66,8 +66,8 @@ export interface InternalNode {
   id: string;
   label: string;
   type: NodeType;
-  /** Ruta del archivo al que pertenece (presente en function/method/class) */
-  path: string;
+  /** Ruta del archivo al que pertenece (presente en function/method/class, ausente en folder) */
+  path?: string;
   returnType?: string | null;
 }
 
