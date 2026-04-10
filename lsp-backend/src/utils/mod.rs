@@ -326,6 +326,7 @@ pub fn find_unused_functions(
 
     functions_in_files
         .iter()
+        .filter(|f| f.function != "main" && !f.function.starts_with('_'))
         .filter(|f| !used.contains(&(f.file_src.as_str(), f.function.as_str())))
         .cloned()
         .collect()

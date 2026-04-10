@@ -10,6 +10,7 @@ use blake3; // Hash para los paths
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::u32;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -575,6 +576,23 @@ impl Backend {
                             }
                         }
                     }
+                } else {
+                    let defined_in_same_file = binding
+                        .get("functions")
+                        .and_then(|v| v.as_array())
+                        .map(|funcs| funcs.iter().any(|f| {
+                            f.get("name").and_then(|n| n.as_str()) == Some(name)
+                        }))
+                        .unwrap_or(false);
+
+                    if defined_in_same_file {
+                        new_connections.push(Connections {
+                            file_src: path_string.to_string(),
+                            file_use: path_string.to_string(),
+                            line,
+                            function: name.to_string(),
+                        });
+                    }
                 }
             }
 
@@ -919,7 +937,7 @@ impl LanguageServer for Backend {
                                         },
                                         end: Position {
                                             line: f.line as u32 - 1,
-                                            character: 0,
+                                            character: u32::MAX,
                                         },
                                     },
                                     severity: Some(DiagnosticSeverity::WARNING),
