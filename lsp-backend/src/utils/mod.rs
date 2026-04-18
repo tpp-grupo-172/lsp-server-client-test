@@ -36,13 +36,24 @@ pub struct FileWarn {
 
 /// Extrae el array de funciones del JSON analizado de un archivo.
 fn extract_functions(file_value: &Value) -> Vec<&Value> {
-    file_value
-        .get("functions")
-        .and_then(|f| f.as_array())
-        .map(|arr| arr.iter().collect())
-        .unwrap_or_default()
-}
+    let mut result: Vec<&Value> = Vec::new();
 
+    // functions (nivel raíz)
+    if let Some(funcs) = file_value.get("functions").and_then(|f| f.as_array()) {
+        result.extend(funcs.iter());
+    }
+
+    // classes[].methods (puede no existir o estar vacío)
+    if let Some(classes) = file_value.get("classes").and_then(|c| c.as_array()) {
+        for class in classes {
+            if let Some(methods) = class.get("methods").and_then(|m| m.as_array()) {
+                result.extend(methods.iter());
+            }
+        }
+    }
+
+    result
+}
 /// Retorna el nombre de una función desde su `Value`.
 fn get_name(func: &Value) -> Option<&str> {
     func.get("name")?.as_str()
@@ -315,6 +326,7 @@ pub fn find_unused_functions(
 
     functions_in_files
         .iter()
+        .filter(|f| f.function != "main" && !f.function.starts_with('_'))
         .filter(|f| !used.contains(&(f.file_src.as_str(), f.function.as_str())))
         .cloned()
         .collect()
