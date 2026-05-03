@@ -262,16 +262,41 @@ fn format_for_lsp_message(
     data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>,
     root: PathBuf
 ) -> Vec<LspFileMessage> {
+    /// Strips `root` from `abs_path` and returns a clean relative path string.
+    fn relativize(abs_path: &Path, root: &Path) -> String {
+        abs_path
+            .strip_prefix(root)
+            .unwrap_or(abs_path)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     data.iter()
         .filter_map(|(path, value)| {
             // aseguramos que el Value tenga las keys esperadas
             let classes = value.get("classes")?.clone();
             let functions = value.get("functions")?.clone();
-            let imports = value.get("imports")?.clone();
+            let imports_raw = value.get("imports")?.as_array()?.clone();
 
             // intentamos deserializar las funciones (podrían ser objetos)
             let functions: Vec<FunctionData> = serde_json::from_value(functions).ok()?;
 
+            // Relativizamos el path del archivo usando Path::strip_prefix (más robusto que str)
+            let file_name = relativize(path, &root);
+
+            // Relativizamos también los paths dentro de cada import
+            let imports = imports_raw
+                .into_iter()
+                .map(|mut import| {
+                    if let Some(path_str) = import.get("path").and_then(|p| p.as_str()) {
+                        let relative = relativize(Path::new(path_str), &root);
+                        if let Some(obj) = import.as_object_mut() {
+                            obj.insert("path".to_string(), Value::String(relative));
+                        }
+                    }
+                    import
+                })
+                .collect::<Vec<_>>();
             let path_string = path.to_str().unwrap_or("");
             let root_str = root.to_str().unwrap_or("");
 
@@ -281,10 +306,10 @@ fn format_for_lsp_message(
               .to_string();
 
             Some(LspFileMessage {
-                file_name: file_path,
+                file_name,
                 classes: classes.as_array().cloned().unwrap_or_default(),
                 functions,
-                imports: imports.as_array().cloned().unwrap_or_default(),
+                imports,
             })
         })
         .collect()

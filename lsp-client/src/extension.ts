@@ -72,6 +72,7 @@ export function activate(context: vscode.ExtensionContext) {
             .then(doc => vscode.window.showTextDocument(doc, { preview: false }))
               .then(editor => {
                 const position = new vscode.Position(file.line - 1, 0);
+                
                 editor.selection = new vscode.Selection(position, position);
                 editor.revealRange(
                   new vscode.Range(position, position),
@@ -93,6 +94,7 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.ViewColumn.One,
       {
         enableScripts: true,
+        retainContextWhenHidden: true,
         localResourceRoots: [
           context.extensionUri
         ]

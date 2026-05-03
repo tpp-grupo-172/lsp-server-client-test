@@ -2,7 +2,7 @@
 export const mockTreeSitterData = {
   files: [
     {
-      path: "folder1/file1.py",
+      file_name: "folder1/file1.py",
       name: "file1.py",
       imports: [
         {
@@ -80,7 +80,7 @@ export const mockTreeSitterData = {
       ]
     },
     {
-      path: "folder1/file2.py",
+      file_name: "folder1/file2.py",
       name: "file2.py",
       imports: [],
       functions: [
@@ -100,7 +100,7 @@ export const mockTreeSitterData = {
       classes: []
     },
     {
-      path: "folder3/file3.py",
+      file_name: "folder3/file3.py",
       name: "file3.py",
       imports: [],
       functions: [

@@ -1,13 +1,16 @@
 <!-- src/lib/GraphView.svelte -->
 <script>
-	import { onMount, onDestroy } from 'svelte';
 	import cytoscape from 'cytoscape';
-	// @ts-ignore -- no type declarations for cytoscape-cose-bilkent
+	import { onDestroy, onMount } from 'svelte';
+// @ts-ignore -- no type declarations for cytoscape-cose-bilkent
 	import coseBilkent from 'cytoscape-cose-bilkent';
+	// @ts-ignore -- no type declarations for cytoscape-edge-connections
+	import edgeConnections from 'cytoscape-edge-connections';
 	import './GraphView.css';
 	import { sendMessage } from './vscode';
 
 	cytoscape.use(coseBilkent);
+	cytoscape.use(edgeConnections);
 
 	/** @type {import('./GraphCache').GraphCache} */
 	export let graphCache;
@@ -19,6 +22,9 @@
 	// ── State ───────────────────────────────────────────────────────────────────
 	/** @type {cytoscape.Core | null} */
 	let cy = null;
+
+	/** @type {any | null} */
+	let ec = null;
 
 	/** @type {string[]} Stack of folder IDs visited (index 0 = root) */
 	let navigationStack = [];
@@ -105,6 +111,9 @@
 	}));
 
 	// ── Lifecycle ────────────────────────────────────────────────────────────────
+	/** @type {import('./GraphCache').GraphCache | null} */
+	let _mountedCache = null;
+
 	onMount(() => {
 		const rootId = graphCache.getRootId();
 		console.log(graphCache);
@@ -113,7 +122,15 @@
 			renderLevel(rootId);
 		}
 		window.addEventListener('message', handleRenameResult);
+		_mountedCache = graphCache;
 	});
+
+	// Cuando llega nueva data (graphCache cambia de referencia después del mount)
+	$: if (graphCache !== _mountedCache && _mountedCache !== null && cy) {
+		_mountedCache = graphCache;
+		const currentId = navigationStack[navigationStack.length - 1] ?? graphCache.getRootId();
+		refreshLevel(currentId);
+	}
 
 	onDestroy(() => {
 		cy?.destroy();
@@ -145,42 +162,147 @@
 	// ── Overlap resolution ──────────────────────────────────────────────────────
 	/** @param {import('cytoscape').Core} cyInstance */
 	function resolveAllOverlaps(cyInstance) {
-		const MARGIN = 10;
-		const topLevel = cyInstance.nodes(':orphan');
+		const MARGIN = 100;
+		const nodes = cyInstance.nodes(':orphan').toArray();
 
 		let changed = true;
 		let passes = 0;
 
-		while (changed && passes < 20) {
+		while (changed && passes < 50) {
 			changed = false;
 			passes++;
 
-			topLevel.forEach((node) => {
-				topLevel.not(node).forEach((other) => {
-					const bb = node.boundingBox();
-					const obb = other.boundingBox();
+			for (let i = 0; i < nodes.length; i++) {
+				for (let j = i + 1; j < nodes.length; j++) {
+					const a = nodes[i];
+					const b = nodes[j];
+					const bb = a.boundingBox();
+					const obb = b.boundingBox();
 
 					const overlapX = Math.min(bb.x2, obb.x2) - Math.max(bb.x1, obb.x1) + MARGIN;
 					const overlapY = Math.min(bb.y2, obb.y2) - Math.max(bb.y1, obb.y1) + MARGIN;
 
 					if (overlapX > 0 && overlapY > 0) {
-						const nodeCx = (bb.x1 + bb.x2) / 2;
-						const otherCx = (obb.x1 + obb.x2) / 2;
-						const nodeCy = (bb.y1 + bb.y2) / 2;
-						const otherCy = (obb.y1 + obb.y2) / 2;
+						const dx = (bb.x1 + bb.x2) / 2 - (obb.x1 + obb.x2) / 2 || 1;
+						const dy = (bb.y1 + bb.y2) / 2 - (obb.y1 + obb.y2) / 2 || 1;
 
 						if (overlapX <= overlapY) {
-							const dir = nodeCx >= otherCx ? 1 : -1;
-							node.position('x', node.position('x') + dir * overlapX);
+							const half = overlapX / 2;
+							const dir = dx >= 0 ? 1 : -1;
+							a.position('x', a.position('x') + dir * half);
+							b.position('x', b.position('x') - dir * half);
 						} else {
-							const dir = nodeCy >= otherCy ? 1 : -1;
-							node.position('y', node.position('y') + dir * overlapY);
+							const half = overlapY / 2;
+							const dir = dy >= 0 ? 1 : -1;
+							a.position('y', a.position('y') + dir * half);
+							b.position('y', b.position('y') - dir * half);
 						}
 						changed = true;
 					}
-				});
-			});
+				}
+			}
 		}
+	}
+
+	// ── Edge bundling ────────────────────────────────────────────────────────────
+	/**
+	 * Groups edges by (target, type). For each group with ≥2 edges, the first
+	 * becomes the trunk edge (source→target node) and the rest become branch edges
+	 * whose target is the trunk edge's ID — the library resolves that to the
+	 * trunk's aux node automatically.
+	 *
+	 * @param {{ data: Record<string, unknown> }[]} edges
+	 * @returns {{ data: Record<string, unknown> }[]}
+	 */
+	function groupEdgesForBundling(edges) {
+		/** @type {Map<string, { data: Record<string, unknown> }[]>} */
+		const groups = new Map();
+		for (const edge of edges) {
+			const key = `${edge.data.type}::${edge.data.target}`;
+			if (!groups.has(key)) groups.set(key, []);
+			/** @type {{ data: Record<string, unknown> }[]} */ (groups.get(key)).push(edge);
+		}
+
+		/** @type {{ data: Record<string, unknown> }[]} */
+		const result = [];
+		for (const group of groups.values()) {
+			// Trunk: first edge in the group — connects two node IDs as usual
+			result.push(group[0]);
+			// Branches: remaining edges point to the trunk edge's ID
+			for (let i = 1; i < group.length; i++) {
+				result.push({
+					data: {
+						id: `branch::${i}::${group[0].data.id}::${group[i].data.source}`,
+						source: group[i].data.source,
+						target: group[0].data.id, // edge ID → library resolves to aux node
+						type: group[i].data.type
+					}
+				});
+			}
+		}
+		return result;
+	}
+
+	// ── Incremental update (preserva posiciones) ─────────────────────────────────
+	/** @param {string} folderId */
+	function refreshLevel(folderId) {
+		if (!cy || !ec) return;
+		selectedNode = null;
+
+		const { nodes, edges } = graphCache.getLevelElements(folderId);
+		const newNodeMap = /** @type {Map<string, { data: Record<string, unknown> }>} */ (
+			new Map(nodes.map((n) => [/** @type {string} */ (n.data.id), n]))
+		);
+
+		// Guardar posiciones de nodos existentes
+		/** @type {Map<string, { x: number, y: number }>} */
+		const savedPos = new Map();
+		cy.nodes().not('.aux-node').forEach((n) => {
+			savedPos.set(n.id(), { ...n.position() });
+		});
+
+		// Limpiar edges y aux-nodes del plugin
+		cy.edges().remove();
+		cy.nodes('.aux-node').remove();
+
+		cy.batch(() => {
+			// Eliminar nodos que ya no existen
+			cy.nodes().forEach((n) => {
+				if (!newNodeMap.has(n.id())) n.remove();
+			});
+
+			// Agregar o actualizar nodos
+			for (const [id, nodeData] of newNodeMap) {
+				const existing = cy.getElementById(id);
+				if (existing.length === 0) {
+					cy.add({ group: 'nodes', data: nodeData.data });
+				} else {
+					existing.data(nodeData.data);
+				}
+			}
+
+			// Restaurar posiciones de nodos que sobrevivieron
+			savedPos.forEach((pos, id) => {
+				const node = cy.getElementById(id);
+				if (node.length) node.position(pos);
+			});
+
+			// Posicionar nodos nuevos en el centro del viewport
+			const ext = cy.extent();
+			const cx = (ext.x1 + ext.x2) / 2;
+			const cy_ = (ext.y1 + ext.y2) / 2;
+			let i = 0;
+			cy.nodes().not('.aux-node').forEach((n) => {
+				if (!savedPos.has(n.id())) {
+					n.position({ x: cx + i * 60, y: cy_ + i * 60 });
+					i++;
+				}
+			});
+		});
+
+		// Re-agregar edges vía edge-connections
+		ec = cy.edgeConnections();
+		ec.addEdges(groupEdgesForBundling(edges));
 	}
 
 	// ── Core render ──────────────────────────────────────────────────────────────
@@ -192,6 +314,7 @@
 		if (cy) {
 			cy.destroy();
 			cy = null;
+			ec = null;
 		}
 
 		if (!container) return;
@@ -200,7 +323,7 @@
 
 		cy = cytoscape(/** @type {any} */ ({
 			container,
-			elements: { nodes, edges },
+			elements: { nodes },
 			style: buildStyle(),
 			userZoomingEnabled: true,
 			userPanningEnabled: true,
@@ -209,10 +332,12 @@
 			maxZoom: 4,
 			zoom: 1,
 			zoomingEnabled: true,
-			pixelRatio: 1,
+			pixelRatio: window.devicePixelRatio ?? 1,
 			motionBlur: true,
 			wheelSensitivity: 0.5
 		}));
+
+		ec = cy.edgeConnections();
 
 		cy.layout(/** @type {any} */ ({
 			name: 'cose-bilkent',
@@ -224,13 +349,15 @@
 			gravity: 0.15, // más compactación
 			numIter: 2500,
 			tile: true,
-			padding: 50,
+			padding: 1000,
 			randomize: false,
 			animate: false
 		})).run();
 
 		resolveAllOverlaps(cy);
 		cy.fit("60");
+
+		ec.addEdges(groupEdgesForBundling(edges));
 
 		// ── Event handlers ─────────────────────────────────────────────────────────
 		// Folder: navigate into
@@ -313,13 +440,37 @@
 	/** @returns {any[]} */
 	function buildStyle() {
 		return [
+			// ── Z-order: nodes siempre por encima de edges ──────────────────────────
+			{
+				selector: 'node',
+				style: { 'z-index': 10 }
+			},
+			{
+				selector: 'edge',
+				style: { 'z-index': 1 }
+			},
+
+			// ── Aux nodes (cytoscape-edge-connections midpoints) ────────────────────
+			{
+				selector: 'node.aux-node',
+				style: {
+					width: 8,
+					height: 8,
+					shape: 'ellipse',
+					'border-width': 0,
+					label: '',
+					'overlay-opacity': 0,
+					events: 'no'
+				}
+			},
+
 			// ── Folder nodes ────────────────────────────────────────────────────────
 			{
 				selector: 'node[type="folder"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 200,
-					height: 200,
+					width: 150,
+					height: 50,
 					'background-color': '#2a2618',
 					'border-width': 2,
 					'border-color': '#e5c07b',
@@ -340,8 +491,8 @@
 				selector: 'node[type="file"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 200,
-					height: 200,
+					width: 150,
+					height: 50,
 					'background-color': '#12243a',
 					'background-opacity': 0.85,
 					'border-width': 2,
@@ -363,8 +514,8 @@
 				selector: 'node[type="class"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 200,
-					height: 200,
+					width: 150,
+					height: 50,
 					'background-color': '#25466e',
 					'background-opacity': 0.6,
 					'border-width': 2,
@@ -388,8 +539,8 @@
 				selector: 'node[type="function"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 200,
-					height: 200,
+					width: 150,
+					height: 50,
 					padding: '6px',
 					'background-color': '#0d2b25',
 					'border-width': 1.5,
@@ -409,8 +560,8 @@
 				selector: 'node[type="method"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 200,
-					height: 200,
+					width: 150,
+					height: 50,
 					padding: '6px',
 					'background-color': '#29271a',
 					'border-width': 1.5,
@@ -425,6 +576,17 @@
 				}
 			},
 
+			// ── External import source nodes ────────────────────────────────────────
+			// Nodes that are imported by files outside their own directory
+			{
+				selector: 'node[?externalImport]',
+				style: {
+					'background-color': '#2d1500',
+					'border-color': '#e06030',
+					color: '#e07848'
+				}
+			},
+
 			// ── Import edges (dashed) ────────────────────────────────────────────────
 			{
 				selector: 'edge[type="imports"]',
@@ -436,7 +598,9 @@
 					'target-arrow-color': '#5a6472',
 					'target-arrow-shape': 'none',
 					'arrow-scale': 0.9,
-					'curve-style': 'bezier',
+					'curve-style': 'round-taxi',
+					'taxi-direction': 'auto',
+					'taxi-turn': '50%',
 					'font-size': 10,
 					color: '#5a6472',
 					'edge-text-rotation': 'none',
@@ -456,7 +620,9 @@
 					'target-arrow-color': '#4ec9b0',
 					'target-arrow-shape': 'triangle',
 					'arrow-scale': 0.9,
-					'curve-style': 'bezier',
+					'curve-style': 'round-taxi',
+					'taxi-direction': 'auto',
+					'taxi-turn': '50%',
 					'font-size': 10,
 					color: '#4ec9b0',
 					'edge-text-rotation': 'none',
@@ -465,13 +631,6 @@
 					'text-background-padding': '2px'
 				}
 			},
-			{
-				selector: 'edge',
-				style: {
-					'curve-style': 'taxi',
-					'taxi-direction': 'horizontal'
-				}
-			}
 		];
 	}
 
@@ -529,6 +688,14 @@
 				<div class="legend-item">
 					<span class="legend-line solid"></span>
 					<span class="legend-label">calls</span>
+				</div>
+				<div class="legend-item">
+					<span class="legend-dot external"></span>
+					<span class="legend-label">externo al directorio</span>
+				</div>
+				<div class="legend-item">
+					<span class="legend-dot bundle-point"></span>
+					<span class="legend-label">punto de convergencia</span>
 				</div>
 			</div>
 		</nav>

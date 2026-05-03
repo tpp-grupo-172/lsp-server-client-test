@@ -18,7 +18,6 @@ export class GraphCache {
    */
   constructor(rawData) {
     const graph = buildGraphFromTreeSitter(rawData);
-    console.log(123123)
     /** @type {Map<string, InternalNode>} */
     this._nodes = graph.nodes;
 
@@ -36,7 +35,7 @@ export class GraphCache {
 
   /** @returns {string} */
   getRootId() {
-    return '__root__';
+    return 'root';
   }
 
   /**
@@ -173,6 +172,30 @@ export class GraphCache {
       return null;
     };
 
+    // Pre-pass: mark visible nodes that are sources of cross-directory imports.
+    // An import is "cross-directory" when the imported file and the importing file
+    // live in different immediate parent folders.
+    const externalImportSourceIds = new Set();
+    for (const edge of this._edges) {
+      if (edge.type !== 'imports') continue;
+      const src = getVisibleAncestor(edge.source);
+      const tgt = getVisibleAncestor(edge.target);
+      if (!src || !tgt || src === tgt) continue;
+
+      const sourceParentFolder = this._parentMap.get(edge.source);
+      const targetParentFolder = this._parentMap.get(edge.target);
+      if (sourceParentFolder !== targetParentFolder) {
+        externalImportSourceIds.add(src);
+      }
+    }
+
+    // Mark nodes that are external import sources
+    for (const cyNode of cytoscapeNodes) {
+      if (externalImportSourceIds.has(/** @type {string} */ (cyNode.data.id))) {
+        cyNode.data.externalImport = true;
+      }
+    }
+
     // Edges: fold endpoints inside collapsed folders to their visible ancestor
     const addedEdgeKeys = new Set();
     for (const edge of this._edges) {
@@ -183,7 +206,7 @@ export class GraphCache {
 
       if (!src || !tgt || src === tgt) continue;
 
-      const key = `${edge.type}::${src}->${tgt}`;
+      const key = `${edge.type}|${src}|${tgt}`;
       if (addedEdgeKeys.has(key)) continue;
       addedEdgeKeys.add(key);
 

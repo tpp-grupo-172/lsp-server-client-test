@@ -256,6 +256,26 @@ body {
 	color: #6e7681;
 }
 
+/* .legend-dot {
+	display: inline-block;
+	width: 12px;
+	height: 12px;
+	border-radius: 3px;
+	border: 2px solid;
+	flex-shrink: 0;
+}
+
+.legend-dot.external {
+	background: #2d1500;
+	border-color: #e06030;
+}
+
+.legend-dot.bundle-point {
+	background: #5a6472;
+	border-color: #5a6472;
+	border-radius: 50%;
+}
+ */
 /* ── Imported functions section ── */
 .imports-title {
 	font-size: 10px;

@@ -1,9 +1,9 @@
 import { writable, type Writable } from 'svelte/store';
 import type { ProjectGraph } from './types';
 
-export type LspData = ProjectGraph;
 
-export const lspData: Writable<LspData | null> = writable(null);
+
+export const lspData: Writable<any | null> = writable(null);
 
 declare global {
   interface Window {

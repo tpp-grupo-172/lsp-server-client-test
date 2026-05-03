@@ -3,23 +3,21 @@
 //
 // Responsabilidad: transformar el payload crudo del API (TreeSitterData)
 // en una estructura de grafo interna usable por GraphCache.
-//
-// Formato de ENTRADA  →  { files: [{ path, name, functions: [{name}] }] }
-// Formato de SALIDA   →  import('./protocol').InternalGraph
 
-// Los tipos InternalNode, InternalEdge, InternalGraph, NodeType, EdgeType
-// están definidos en protocol.ts — no se duplican aquí.
+// ── ID builders ───────────────────────────────────────────────────────────────
+// Funciones puras que definen el esquema de IDs del grafo interno.
+// Un solo lugar para cambiar el formato si fuera necesario.
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+/** @param {string} filePath @param {string} name */
+const mkFnId  = (filePath, name) => `fn::${filePath}::${name}`;
 
-/**
- * Escapes characters that are special in CSS selectors used by Cytoscape.
- * @param {string} str
- * @returns {string}
- */
-function sanitizeId(str) {
-    return str.replace(/[\[\]#.()\{\}\|^$*+?\\/"'`~!@%&=<>,; ]/g, '_');
-}
+/** @param {string} filePath @param {string} name */
+const mkClsId = (filePath, name) => `cls::${filePath}::${name}`;
+
+/** @param {string} filePath @param {string} cls @param {string} name */
+const mkMthId = (filePath, cls, name) => `mth::${filePath}::${cls}::${name}`;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
  * Splits "src/components/Button.py" into
@@ -28,16 +26,14 @@ function sanitizeId(str) {
  * @returns {{ dirs: string[], filename: string }}
  */
 function parsePath(path) {
-    console.log(path);
     const parts = path.split('/');
     return { dirs: parts.slice(0, -1), filename: parts[parts.length - 1] };
 }
 
-// ── Adapter ──────────────────────────────────────────────────────────────────
+// ── Adapter ───────────────────────────────────────────────────────────────────
 
 /**
  * Converts a raw TreeSitterData payload into an InternalGraph.
- * This is the single place where the API format is interpreted.
  *
  * @param {import('./protocol').TreeSitterData} data
  * @returns {import('./protocol').InternalGraph}
@@ -46,6 +42,7 @@ export function buildGraphFromTreeSitter(data) {
     if (!data || !Array.isArray(data.files)) {
         throw new Error('buildGraphFromTreeSitter: data.files debe ser un array');
     }
+
     /** @type {Map<string, import('./protocol').InternalNode>} */
     const nodes = new Map();
 
@@ -58,16 +55,11 @@ export function buildGraphFromTreeSitter(data) {
     /** @type {Map<string, string>} */
     const parentMap = new Map();
 
-    // ── Scoped build utilities ────────────────────────────────────────────────
+    // ── Utilities ─────────────────────────────────────────────────────────────
 
     /** @param {import('./protocol').InternalNode} node */
     function addNode(node) {
         nodes.set(node.id, node);
-    }
-
-    /** @param {import('./protocol').InternalEdge} edge */
-    function addEdge(edge) {
-        edges.push(edge);
     }
 
     /**
@@ -76,29 +68,28 @@ export function buildGraphFromTreeSitter(data) {
      * @param {import('./protocol').EdgeType} edgeType
      */
     function link(parentId, childId, edgeType) {
-        addEdge({ id: `${edgeType}::${parentId}->${childId}`, source: parentId, target: childId, type: edgeType });
-
-        // Only structural edges define the tree hierarchy
+        edges.push({
+            id: `${edgeType}|${parentId}|${childId}`,
+            source: parentId,
+            target: childId,
+            type: edgeType,
+        });
         if (edgeType === 'contains' || edgeType === 'declares') {
-            if (!childrenMap.has(parentId)) {
-                childrenMap.set(parentId, []);
-            }
+            if (!childrenMap.has(parentId)) childrenMap.set(parentId, []);
             /** @type {string[]} */ (childrenMap.get(parentId)).push(childId);
             parentMap.set(childId, parentId);
         }
     }
 
     /**
-     * Ensures all intermediate folder nodes exist for a dir segment array.
-     * Returns the id of the deepest folder (direct parent of the file).
+     * Ensures all intermediate folder nodes exist. Returns the deepest folder ID.
      * @param {string[]} dirs
      * @returns {string}
      */
     function ensureFolders(dirs) {
-        let currentId = '__root__';
+        let currentId = 'root';
         for (let i = 0; i < dirs.length; i++) {
             const folderId = dirs.slice(0, i + 1).join('/');
-            console.log("FOLDER ID:", currentId)
             if (!nodes.has(folderId)) {
                 addNode({ id: folderId, label: dirs[i], type: 'folder' });
                 link(currentId, folderId, 'contains');
@@ -108,106 +99,151 @@ export function buildGraphFromTreeSitter(data) {
         return currentId;
     }
 
-    /** @param {import('./protocol').TreeSitterData} data */
-    function setFunctionDeclarations(data) {
-        for (const file of data.files) {
-            console.log(file);
-            let { dirs, filename } = parsePath(file.path);
-            //dirs = dirs.slice(-3)
-            const parentFolderId = ensureFolders(dirs);
-            // File node
-            addNode({ id: file.path, label: filename, type: 'file', path: file.path });
-            link(parentFolderId, file.path, 'contains');
+    // ── Root ──────────────────────────────────────────────────────────────────
+    addNode({ id: 'root', label: 'root', type: 'folder' });
 
-            // Function / symbol nodes
-            for (const fn of file.functions) {
-                console.log(1)
-                const fnId = `${sanitizeId(file.path)}::${sanitizeId(fn.name)}`;
+    // ── Pass 1: build all nodes ───────────────────────────────────────────────
+    for (const file of data.files) {
+        if (!file.file_name) {
+            console.warn('[treeSitterAdapter] archivo sin file_name:', file);
+            continue;
+        }
+
+        const { dirs, filename } = parsePath(file.file_name);
+        const parentFolderId = ensureFolders(dirs);
+
+        addNode({ id: file.file_name, label: filename, type: 'file', path: file.file_name });
+        link(parentFolderId, file.file_name, 'contains');
+
+        for (const fn of file.functions ?? []) {
+            const id = mkFnId(file.file_name, fn.name);
+            addNode({
+                id,
+                label: fn.name,
+                type: 'function',
+                path: file.file_name,
+                returnType: fn.return_type ?? fn.returnType ?? null,
+            });
+            link(file.file_name, id, 'declares');
+        }
+
+        for (const cls of file.classes ?? []) {
+            const clsId = mkClsId(file.file_name, cls.name);
+            addNode({ id: clsId, label: cls.name, type: 'class', path: file.file_name });
+            link(file.file_name, clsId, 'declares');
+
+            for (const method of cls.methods ?? []) {
+                const mthId = mkMthId(file.file_name, cls.name, method.name);
                 addNode({
-                    id: fnId,
-                    label: fn.name,
-                    type: 'function',
-                    path: file.path,
-                    returnType: fn.returnType ?? fn.return_type ?? null,
+                    id: mthId,
+                    label: method.name,
+                    type: 'method',
+                    path: file.file_name,
+                    returnType: method.return_type ?? method.returnType ?? null,
                 });
-                link(file.path, fnId, 'declares');
-            }
-
-            // Class nodes and their methods
-            for (const cls of (file.classes ?? [])) {
-                console.log(2)
-                const classId = `${sanitizeId(file.path)}::${sanitizeId(cls.name)}`;
-                addNode({ id: classId, label: cls.name, type: 'class', path: file.path });
-                link(file.path, classId, 'declares');
-
-                for (const method of (cls.methods ?? [])) {
-                    console.log(3)
-                    const methodId = `${classId}::${sanitizeId(method.name)}`;
-                    addNode({
-                        id: methodId,
-                        label: method.name,
-                        type: 'method',
-                        path: file.path,
-                        returnType: method.returnType ?? method.return_type ?? null,
-                    });
-                    link(classId, methodId, 'declares');
-                }
-            }
-        }
-    }
-    /** @param {import('./protocol').TreeSitterData} data */
-    function setLinkImports(data) {
-        for (const file of data.files) {
-            for (const importedFile of file.imports) {
-                if (!importedFile.path) continue;
-                const importId = importedFile.path;
-                const importedNode = nodes.get(importId)
-                if (!importedNode) continue;
-                const fileId = file.path;
-                const fileNode = nodes.get(fileId)
-                if (!fileNode) continue;
-                link(importedNode.id, fileNode.id, 'imports');
+                link(clsId, mthId, 'declares');
             }
         }
     }
 
-    /** @param {import('./protocol').TreeSitterData} data */
-    function setLinkCalls(data) {
-        for (const file of data.files) {
-            for (const fn of file.functions) {
-                for (const call of fn.function_calls) {
-                    for (const importedFile of file.imports) {
-                        
-                        if (!importedFile.path) {
-                            continue
-                        }
+    // ── Pass 2: build all edges (all nodes exist now) ─────────────────────────
+    for (const file of data.files) {
+        if (!file.file_name) continue;
 
-                        const fnId = `${sanitizeId(importedFile.path)}::${sanitizeId(call.name)}`;
+        // importAlias → resolved file path (e.g. "core_user" → "projecto/user.py")
+        /** @type {Map<string, string>} */
+        const importPathByName = new Map();
+        for (const imp of file.imports ?? []) {
+            if (imp.path) importPathByName.set(imp.name, imp.path);
+        }
 
-                        const node = nodes.get(fnId)
-                        if (!node) continue;
-                        console.log(5)
-                        const currentFnId = `${sanitizeId(file.path)}::${sanitizeId(fn.name)}`;
-                        const pathNode = nodes.get(currentFnId)
-                        if (!pathNode) continue;
+        // Import edges: declared file → importing file
+        for (const imp of file.imports ?? []) {
+            if (!imp.path) continue;
+            if (!nodes.has(imp.path)) continue;
+            link(imp.path, file.file_name, 'imports');
+        }
 
-                        link(pathNode.id, node.id, 'calls');
-                    }
-                }
+        // Call edges from top-level functions
+        for (const fn of file.functions ?? []) {
+            const callerId = mkFnId(file.file_name, fn.name);
+            const paramNames = new Set((fn.parameters ?? []).map(/** @param {{name:string}} p */ p => p.name));
+            buildCallEdges(fn.function_calls ?? [], callerId, file.file_name, importPathByName, paramNames);
+        }
+
+        // Call edges from class methods
+        for (const cls of file.classes ?? []) {
+            for (const method of cls.methods ?? []) {
+                const callerId = mkMthId(file.file_name, cls.name, method.name);
+                const paramNames = new Set((method.parameters ?? []).map(/** @param {{name:string}} p */ p => p.name));
+                buildCallEdges(method.function_calls ?? [], callerId, file.file_name, importPathByName, paramNames);
             }
         }
     }
-
-    // ── Build graph ───────────────────────────────────────────────────────────
-
-    addNode({ id: '__root__', label: 'root', type: 'folder' });
-
-
-    setFunctionDeclarations(data);
-
-
-    setLinkCalls(data);
-    setLinkImports(data);
 
     return { nodes, edges, childrenMap, parentMap };
+
+    // ── Call edge resolution ──────────────────────────────────────────────────
+
+    /**
+     * @param {import('./protocol').FunctionCallData[]} calls
+     * @param {string} callerId
+     * @param {string} callerFilePath
+     * @param {Map<string, string>} importPathByName
+     * @param {Set<string>} paramNames
+     */
+    function buildCallEdges(calls, callerId, callerFilePath, importPathByName, paramNames) {
+        for (const call of calls) {
+            if (!call.import_name) continue;
+            if (call.is_native) continue;
+
+            // Skip method calls on parameters (e.g. self.foo(), user.is_valid())
+            if (paramNames.has(call.import_name)) continue;
+
+            const importedFilePath = importPathByName.get(call.import_name);
+            if (!importedFilePath) {
+                console.warn(
+                    `[treeSitterAdapter] call no resuelta: import_name="${call.import_name}" fn="${call.name}" en ${callerFilePath}`
+                );
+                continue;
+            }
+
+            // Collect candidate file paths to search:
+            // If importedFilePath is a folder node, expand to its direct file children.
+            // This handles cases where the backend resolved the import to a package
+            // directory instead of a specific file (e.g. "projecto" → search all files in it).
+            const importNode = nodes.get(importedFilePath);
+            const candidateFiles = (importNode?.type === 'folder')
+                ? (childrenMap.get(importedFilePath) ?? []).filter(id => nodes.get(id)?.type === 'file')
+                : [importedFilePath];
+
+            let resolved = false;
+            for (const filePath of candidateFiles) {
+                // Try top-level function
+                const fnTarget = mkFnId(filePath, call.name);
+                if (nodes.has(fnTarget)) {
+                    link(callerId, fnTarget, 'calls');
+                    resolved = true;
+                    break;
+                }
+                // Try method (unknown class)
+                const mthPrefix = `mth::${filePath}::`;
+                const mthSuffix = `::${call.name}`;
+                for (const nodeId of nodes.keys()) {
+                    if (nodeId.startsWith(mthPrefix) && nodeId.endsWith(mthSuffix)) {
+                        link(callerId, nodeId, 'calls');
+                        resolved = true;
+                        break;
+                    }
+                }
+                if (resolved) break;
+            }
+
+            if (!resolved) {
+                console.warn(
+                    `[treeSitterAdapter] nodo destino no encontrado: "${mkFnId(importedFilePath, call.name)}" en ${callerFilePath}`
+                );
+            }
+        }
+    }
 }
