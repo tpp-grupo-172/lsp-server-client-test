@@ -114,7 +114,7 @@ function activate(context) {
         const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource};">`;
         html = html.replace('<head>', `<head>\n    ${csp}`);
         panel.webview.html = html;
-        panel.webview.onDidReceiveMessage(message => {
+        panel.webview.onDidReceiveMessage(async (message) => {
             if (message.command === 'requestData') {
                 if (files) {
                     panel.webview.postMessage({
@@ -123,6 +123,26 @@ function activate(context) {
                     });
                 }
                 // If files is null, the LSP notification will push data when it arrives
+            }
+            if (message.command === 'rename-function') {
+                try {
+                    const result = await client.sendRequest('lsp-server/renameFunction', {
+                        file_path: message.filePath,
+                        old_name: message.oldName,
+                        new_name: message.newName
+                    });
+                    panel.webview.postMessage({
+                        command: 'rename-function-result',
+                        ...result
+                    });
+                }
+                catch (e) {
+                    panel.webview.postMessage({
+                        command: 'rename-function-result',
+                        success: false,
+                        error: e?.message ?? 'Error desconocido'
+                    });
+                }
             }
         }, undefined, context.subscriptions);
     });

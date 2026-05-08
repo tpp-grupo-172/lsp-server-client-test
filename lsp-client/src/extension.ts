@@ -124,7 +124,7 @@ export function activate(context: vscode.ExtensionContext) {
     panel.webview.html = html;
 
     panel.webview.onDidReceiveMessage(
-      message => {
+      async message => {
         if (message.command === 'requestData') {
           if (files) {
             panel.webview.postMessage({
@@ -133,6 +133,26 @@ export function activate(context: vscode.ExtensionContext) {
             });
           }
           // If files is null, the LSP notification will push data when it arrives
+        }
+
+        if (message.command === 'rename-function') {
+          try {
+            const result = await client.sendRequest('lsp-server/renameFunction', {
+              file_path: message.filePath,
+              old_name: message.oldName,
+              new_name: message.newName
+            });
+            panel.webview.postMessage({
+              command: 'rename-function-result',
+              ...(result as object)
+            });
+          } catch (e: any) {
+            panel.webview.postMessage({
+              command: 'rename-function-result',
+              success: false,
+              error: e?.message ?? 'Error desconocido'
+            });
+          }
         }
       },
       undefined,

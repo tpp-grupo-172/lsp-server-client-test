@@ -108,3 +108,20 @@ export interface InternalGraph {
   /** childId → parentId */
   parentMap: Map<string, string>;
 }
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SECCIÓN 3 — Rename
+═══════════════════════════════════════════════════════════════════════════ */
+
+export interface RenameRequest {
+  filePath: string;
+  oldName: string;
+  newName: string;
+}
+
+export interface RenameResult {
+  success: boolean;
+  error?: string;
+  filesEdited?: string[];
+}

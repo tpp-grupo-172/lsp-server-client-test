@@ -42,6 +42,8 @@ struct Connections {
     file_src: String,
     file_use: String,
     line: i64,
+    start_col: usize,
+    end_col: usize,
     function: String,
 }
 
@@ -49,7 +51,9 @@ struct Connections {
 struct FunctionsInFiles {
     file_src: String,
     function: String,
-    line: i64
+    line: i64,
+    name_start_col: usize,
+    name_end_col: usize,
 }
 
 #[derive(Debug)]
@@ -91,6 +95,20 @@ impl Notification for ProcessedJson {
 impl Notification for ShowFilesToChange {
     type Params = ShowFilesToChangePayload;
     const METHOD: &'static str = "lsp-server/showFilesToChange";
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct RenameRequest {
+    file_path: String,
+    old_name: String,
+    new_name: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct RenameResult {
+    success: bool,
+    error: Option<String>,
+    files_edited: Option<Vec<String>>,
 }
 
 // Helpers para manejo de paths
@@ -534,77 +552,200 @@ impl Backend {
             None
         };
 
+        // Helper closure: dado el archivo que define una clase, su nombre y el nombre de un método,
+        // devuelve el return_type de ese método (para resolver cadenas de N niveles).
+        let find_method_return_type = |class_file: &str, class_name: &str, method_name: &str| -> Option<String> {
+            let file_value = store_snapshot.get(&PathBuf::from(class_file))?;
+            let classes = file_value.get("classes")?.as_array()?;
+            for class in classes {
+                if class.get("name")?.as_str()? == class_name {
+                    let methods = class.get("methods")?.as_array()?;
+                    for method in methods {
+                        if method.get("name")?.as_str()? == method_name {
+                            return method.get("return_type")
+                                .filter(|v| !v.is_null())
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                        }
+                    }
+                }
+            }
+            None
+        };
+
         let process_function_calls = |
             function_calls: &Vec<Value>,
             local_variables: &Vec<Value>,
+            parameters: &Vec<Value>,
             path_string: &str,
             imports_hashmap: &HashMap<String, String>,
         | -> Vec<Connections> {
             let mut new_connections = vec![];
 
+            // ── Pre-pass: construir dos mapas para habilitar resolución de cadenas N-profundas
+            //
+            // call_sources: call_name → archivo donde ese método/función está definido
+            //               (se usa como file_src en la Connection)
+            // call_contexts: call_name → (tipo_retornado, archivo_que_define_ese_tipo)
+            //               (se usa para resolver el SIGUIENTE eslabón de la cadena)
+            let mut call_sources: HashMap<String, String>          = HashMap::new();
+            let mut call_contexts: HashMap<String, (String, String)> = HashMap::new();
+
+            for fc in function_calls.iter() {
+                let fc_name   = fc.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let fc_import = fc.get("import_name").and_then(|v| v.as_str());
+                let fc_chain  = fc.get("chain_source_fn").and_then(|v| v.as_str());
+                let fc_object = fc.get("object_name").and_then(|v| v.as_str());
+
+                // Las llamadas encadenadas y las de objeto se resuelven en las pasadas siguientes
+                if fc_chain.is_some() || fc_object.is_some() { continue; }
+
+                if let Some(module) = fc_import {
+                    // Función importada directamente: module.func() o func() de `from X import func`
+                    if let Some(src_file) = imports_hashmap.get(module) {
+                        call_sources.insert(fc_name.to_string(), src_file.clone());
+                        if let Some(rt) = resolve_return_type(module, fc_name) {
+                            if let Some(rt_file) = find_class_file(&rt) {
+                                call_contexts.insert(fc_name.to_string(), (rt, rt_file));
+                            }
+                        }
+                    }
+                } else {
+                    // Función del mismo archivo
+                    let local_fn = binding.get("functions").and_then(|v| v.as_array())
+                        .and_then(|fns| fns.iter().find(|f| {
+                            f.get("name").and_then(|n| n.as_str()) == Some(fc_name)
+                        }));
+                    if local_fn.is_some() {
+                        call_sources.insert(fc_name.to_string(), path_string.to_string());
+                        if let Some(rt) = local_fn
+                            .and_then(|f| f.get("return_type"))
+                            .filter(|v| !v.is_null())
+                            .and_then(|v| v.as_str())
+                        {
+                            if let Some(rt_file) = find_class_file(rt) {
+                                call_contexts.insert(fc_name.to_string(), (rt.to_string(), rt_file));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Pasada iterativa: resolver cadenas encadenadas de cualquier profundidad
+            //
+            // Ejemplo: hola().chau().pepe()
+            //   iteración 1 → resuelve chau (chain_source_fn="hola", hola ya está en call_contexts)
+            //   iteración 2 → resuelve pepe (chain_source_fn="chau", chau ya está en call_contexts)
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for fc in function_calls.iter() {
+                    let fc_name  = fc.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let fc_chain = fc.get("chain_source_fn").and_then(|v| v.as_str());
+
+                    let Some(source_fn) = fc_chain else { continue };
+                    if call_sources.contains_key(fc_name) { continue; }
+
+                    if let Some((source_type, source_file)) = call_contexts.get(source_fn).cloned() {
+                        // El método fc_name vive en la clase source_type, definida en source_file
+                        call_sources.insert(fc_name.to_string(), source_file.clone());
+
+                        // Intentar propagar el return_type para el siguiente eslabón
+                        if let Some(rt) = find_method_return_type(&source_file, &source_type, fc_name) {
+                            if let Some(rt_file) = find_class_file(&rt) {
+                                call_contexts.insert(fc_name.to_string(), (rt, rt_file));
+                            }
+                        }
+                        changed = true;
+                    }
+                }
+            }
+
+            // ── Loop principal: construir Connections usando los mapas pre-computados
             for function_call in function_calls {
-                let name = function_call
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<sin nombre>");
-                let import_name = function_call
-                    .get("import_name")
-                    .and_then(|v| v.as_str());
-                let object_name = function_call
-                    .get("object_name")
-                    .and_then(|v| v.as_str());
-                let line = function_call
-                    .get("line")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
+                let name        = function_call.get("name").and_then(|v| v.as_str()).unwrap_or("<sin nombre>");
+                let import_name = function_call.get("import_name").and_then(|v| v.as_str());
+                let object_name = function_call.get("object_name").and_then(|v| v.as_str());
+                let chain_source_fn = function_call.get("chain_source_fn").and_then(|v| v.as_str());
+                let line      = function_call.get("line").and_then(|v| v.as_i64()).unwrap_or(0);
+                let start_col = function_call.get("start_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let end_col   = function_call.get("end_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
                 if let Some(import_module) = import_name {
-                    // Caso normal — import directo
+                    // Caso 1: llamada directa a función importada
                     if let Some(path) = imports_hashmap.get(import_module) {
                         new_connections.push(Connections {
-                            file_src: path.clone(),
-                            file_use: path_string.to_string(),
-                            line,
-                            function: name.to_string(),
+                            file_src: path.clone(), file_use: path_string.to_string(),
+                            line, start_col, end_col, function: name.to_string(),
                         });
                     }
                 } else if let Some(obj_name) = object_name {
-                    // Caso nuevo — resolver via local_variables + return_type + clase
-                    
-                    // 1. Buscar assigned_from en local_variables
-                    let assigned_from = local_variables
-                        .iter()
+                    // Caso 2: método sobre variable  →  obj.method()
+                    // Prioridad: local_variables (asignada desde función) → parameters (tipo anotado)
+                    let assigned_from = local_variables.iter()
                         .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(obj_name))
                         .and_then(|v| v.get("assigned_from"))
                         .and_then(|v| v.as_str());
 
                     if let Some(assigned_func) = assigned_from {
-                        // 2. Buscar de qué módulo viene assigned_func
-                        let source_import = function_calls
-                            .iter()
+                        let source_import = function_calls.iter()
                             .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(assigned_func))
                             .and_then(|c| c.get("import_name"))
                             .and_then(|v| v.as_str());
 
-                        if let Some(import_module) = source_import {
-                            // 3. Resolver return_type de assigned_func
-                            if let Some(return_type) = resolve_return_type(import_module, assigned_func) {
-                                // 4. Buscar el archivo que define esa clase
+                        if let Some(module) = source_import {
+                            if let Some(return_type) = resolve_return_type(module, assigned_func) {
                                 if let Some(class_file) = find_class_file(&return_type) {
                                     new_connections.push(Connections {
-                                        file_src: class_file,
-                                        file_use: path_string.to_string(),
-                                        line,
-                                        function: name.to_string(),
+                                        file_src: class_file, file_use: path_string.to_string(),
+                                        line, start_col, end_col, function: name.to_string(),
                                     });
                                 }
                             }
                         }
+                    } else {
+                        // Fallback: obj_name podría ser un parámetro con tipo anotado
+                        // ej: def f(product: Product) → product.price()
+                        let param_type = parameters.iter()
+                            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(obj_name))
+                            .and_then(|p| p.get("param_type"))
+                            .and_then(|v| v.as_str());
+
+                        if let Some(type_annotation) = param_type {
+                            // Extraer el tipo base para anotaciones comunes:
+                            //   "Product"           → "Product"
+                            //   "Optional[Product]" → "Product"
+                            //   "Product | None"    → "Product"
+                            //   '"Product"'         → "Product"  (forward ref)
+                            let base_type = {
+                                let t = type_annotation.trim().trim_matches('"').trim_matches('\'');
+                                if let Some(inner) = t.strip_prefix("Optional[").and_then(|s| s.strip_suffix(']')) {
+                                    inner.trim()
+                                } else if let Some(base) = t.split('|').next() {
+                                    base.trim()
+                                } else {
+                                    t
+                                }
+                            };
+                            if let Some(class_file) = find_class_file(base_type) {
+                                new_connections.push(Connections {
+                                    file_src: class_file, file_use: path_string.to_string(),
+                                    line, start_col, end_col, function: name.to_string(),
+                                });
+                            }
+                        }
+                    }
+                } else if let Some(source_fn) = chain_source_fn {
+                    // Caso 3: llamada encadenada  →  resuelto en la pasada iterativa
+                    if let Some(src_file) = call_sources.get(source_fn) {
+                        new_connections.push(Connections {
+                            file_src: src_file.clone(), file_use: path_string.to_string(),
+                            line, start_col, end_col, function: name.to_string(),
+                        });
                     }
                 } else {
-                    let defined_in_same_file = binding
-                        .get("functions")
-                        .and_then(|v| v.as_array())
+                    // Caso 4: llamada local directa (misma función en mismo archivo)
+                    let defined_in_same_file = binding.get("functions").and_then(|v| v.as_array())
                         .map(|funcs| funcs.iter().any(|f| {
                             f.get("name").and_then(|n| n.as_str()) == Some(name)
                         }))
@@ -612,10 +753,8 @@ impl Backend {
 
                     if defined_in_same_file {
                         new_connections.push(Connections {
-                            file_src: path_string.to_string(),
-                            file_use: path_string.to_string(),
-                            line,
-                            function: name.to_string(),
+                            file_src: path_string.to_string(), file_use: path_string.to_string(),
+                            line, start_col, end_col, function: name.to_string(),
                         });
                     }
                 }
@@ -646,10 +785,16 @@ impl Backend {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                let method_parameters = method
+                    .get("parameters")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
 
                 let new_connections = process_function_calls(
                     function_calls,
                     &local_variables,
+                    &method_parameters,
                     &path_string,
                     &imports_hashmap,
                 );
@@ -675,10 +820,16 @@ impl Backend {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+            let func_parameters = func
+                .get("parameters")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
 
             let new_connections = process_function_calls(
                 function_calls,
                 &local_variables,
+                &func_parameters,
                 &path_string,
                 &imports_hashmap,
             );
@@ -710,17 +861,16 @@ impl Backend {
 
             for method in methods {
                 if let Some(function_name) = method.get("name").and_then(|v| v.as_str()) {
+                    let line = method.get("line").and_then(|v| v.as_i64()).unwrap_or(1);
+                    let name_start_col = method.get("name_start_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let name_end_col = method.get("name_end_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-                    let line = method
-                        .get("line")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(1);
-
-                    let cloned_path = path_string.clone();
                     let functions_in_file = FunctionsInFiles {
-                        file_src: cloned_path,
+                        file_src: path_string.clone(),
                         function: function_name.to_string(),
-                        line: line
+                        line,
+                        name_start_col,
+                        name_end_col,
                     };
 
                     let mut guard = self.functions_in_file.write().await;
@@ -736,16 +886,16 @@ impl Backend {
 
         for function in functions {
             if let Some(function_name) = function.get("name").and_then(|v| v.as_str()) {
+                let line = function.get("line").and_then(|v| v.as_i64()).unwrap_or(1);
+                let name_start_col = function.get("name_start_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let name_end_col = function.get("name_end_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-                let line = function
-                  .get("line")
-                  .and_then(|v| v.as_i64())
-                  .unwrap_or(1);
-                let cloned_path = path_string.clone();
                 let functions_in_file = FunctionsInFiles {
-                    file_src: cloned_path,
+                    file_src: path_string.clone(),
                     function: function_name.to_string(),
-                    line: line
+                    line,
+                    name_start_col,
+                    name_end_col,
                 };
 
                 let mut guard = self.functions_in_file.write().await;
@@ -800,6 +950,127 @@ impl Backend {
         let root = { self.workspace_root.read().await.clone() };
         let base = cache_root_for_workspace(&root);
         cleanup_orphan_entries_in(&base).await;
+    }
+
+    /// Renombra una función en su definición y en todos sus call sites.
+    /// Recibe el path relativo al workspace, el nombre actual y el nuevo nombre.
+    async fn rename_function(&self, params: RenameRequest) -> tower_lsp::jsonrpc::Result<RenameResult> {
+        let root = { self.workspace_root.read().await.clone() };
+        let old_name = &params.old_name;
+        let new_name = &params.new_name;
+
+        // Resolver el path relativo que viene del frontend al path absoluto
+        let abs_file_path = root.join(&params.file_path)
+            .to_string_lossy()
+            .to_string();
+
+        // 1. Buscar la definición
+        let definition = {
+            let guard = self.functions_in_file.read().await;
+            guard.iter()
+                .find(|f| f.function == *old_name && f.file_src == abs_file_path)
+                .cloned()
+        };
+
+        let Some(def) = definition else {
+            return Ok(RenameResult {
+                success: false,
+                error: Some(format!("Function '{}' not found in '{}'", old_name, params.file_path)),
+                files_edited: None,
+            });
+        };
+
+        // 2. Recopilar todos los call sites que apuntan a esta definición
+        let call_sites: Vec<Connections> = {
+            let guard = self.connections.read().await;
+            guard.iter()
+                .filter(|c| c.function == *old_name && c.file_src == def.file_src)
+                .cloned()
+                .collect()
+        };
+
+        // 3. Construir mapa: archivo → lista de (línea, col_start, col_end)
+        //    Usamos un HashMap<String, HashMap<usize, Vec<(usize, usize)>>> para agrupar
+        //    edits por archivo y luego por línea.
+        let mut edits: HashMap<String, HashMap<usize, Vec<(usize, usize)>>> = HashMap::new();
+
+        // Definición
+        edits
+            .entry(def.file_src.clone())
+            .or_default()
+            .entry(def.line as usize)
+            .or_default()
+            .push((def.name_start_col, def.name_end_col));
+
+        // Call sites
+        for call in &call_sites {
+            edits
+                .entry(call.file_use.clone())
+                .or_default()
+                .entry(call.line as usize)
+                .or_default()
+                .push((call.start_col, call.end_col));
+        }
+
+        // 4. Aplicar edits en cada archivo
+        let mut files_edited: Vec<String> = vec![];
+
+        for (file_path, lines_map) in &edits {
+            let content = match std::fs::read_to_string(file_path) {
+                Ok(c) => c,
+                Err(e) => return Ok(RenameResult {
+                    success: false,
+                    error: Some(format!("Cannot read '{}': {}", file_path, e)),
+                    files_edited: None,
+                }),
+            };
+
+            let trailing_newline = content.ends_with('\n');
+            let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+            for (line_num, col_edits) in lines_map {
+                let idx = line_num - 1;
+                if idx >= lines.len() { continue; }
+
+                // Aplicar de derecha a izquierda para no desplazar columnas
+                let mut col_edits = col_edits.clone();
+                col_edits.sort_by(|a, b| b.0.cmp(&a.0));
+
+                let line = &mut lines[idx];
+                for (sc, ec) in col_edits {
+                    if sc <= ec && ec <= line.len() {
+                        line.replace_range(sc..ec, new_name);
+                    }
+                }
+            }
+
+            let mut new_content = lines.join("\n");
+            if trailing_newline {
+                new_content.push('\n');
+            }
+
+            if let Err(e) = std::fs::write(file_path, &new_content) {
+                return Ok(RenameResult {
+                    success: false,
+                    error: Some(format!("Cannot write '{}': {}", file_path, e)),
+                    files_edited: None,
+                });
+            }
+
+            // Invalidar caché del archivo editado
+            let path_buf = PathBuf::from(file_path);
+            let base = cache_root_for_workspace(&root);
+            let cache_file = base.join(format!("{}.json", hash_path(&path_buf)));
+            let _ = std::fs::remove_file(cache_file);
+
+            files_edited.push(file_path.clone());
+        }
+
+        Ok(RenameResult {
+            success: true,
+            error: None,
+            files_edited: Some(files_edited),
+        })
     }
 }
 
@@ -1042,14 +1313,16 @@ impl LanguageServer for Backend {
 async fn main() {
     eprintln!("Server is up and running");
 
-    let (service, socket) = LspService::new(|client| Backend {
+    let (service, socket) = LspService::build(|client| Backend {
         client,
         store: RwLock::new(HashMap::new()),
         connections: RwLock::new(vec![]),
         functions_in_file: RwLock::new(vec![]),
         workspace_root: RwLock::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
         ignored_folders: RwLock::new(vec![]),
-    });
+    })
+    .custom_method("lsp-server/renameFunction", Backend::rename_function)
+    .finish();
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
         .await;

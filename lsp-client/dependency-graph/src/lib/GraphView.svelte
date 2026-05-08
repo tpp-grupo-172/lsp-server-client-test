@@ -1,12 +1,13 @@
 <!-- src/lib/GraphView.svelte -->
 <script>
-	import { onMount, onDestroy } from 'svelte';
 	import cytoscape from 'cytoscape';
-	// @ts-ignore -- no type declarations for cytoscape-cose-bilkent
+	import { onDestroy, onMount } from 'svelte';
+// @ts-ignore -- no type declarations for cytoscape-cose-bilkent
 	import coseBilkent from 'cytoscape-cose-bilkent';
 	// @ts-ignore -- no type declarations for cytoscape-edge-connections
 	import edgeConnections from 'cytoscape-edge-connections';
 	import './GraphView.css';
+	import { sendMessage } from './vscode';
 
 	cytoscape.use(coseBilkent);
 	cytoscape.use(edgeConnections);
@@ -34,6 +35,75 @@
 	 */
 	let selectedNode = null;
 
+	// ── Rename state ─────────────────────────────────────────────────────────────
+	/** @type {'idle' | 'editing' | 'loading' | 'success' | 'error'} */
+	let renameState = 'idle';
+	let renameValue = '';
+	let renameError = '';
+	/** @type {string | null} */
+	let _prevNodeId = null;
+
+	// Reset rename state when selected node changes
+	$: {
+		if (selectedNode?.id !== _prevNodeId) {
+			_prevNodeId = selectedNode?.id ?? null;
+			renameState = 'idle';
+			renameValue = '';
+			renameError = '';
+		}
+	}
+
+	function startRename() {
+		renameValue = selectedNode?.label ?? '';
+		renameState = 'editing';
+	}
+
+	function cancelRename() {
+		renameState = 'idle';
+		renameValue = '';
+		renameError = '';
+	}
+
+	function submitRename() {
+		if (!selectedNode || !renameValue.trim() || renameValue.trim() === selectedNode.label) {
+			cancelRename();
+			return;
+		}
+		renameState = 'loading';
+		sendMessage('rename-function', {
+			filePath: selectedNode.path,
+			oldName: selectedNode.label,
+			newName: renameValue.trim()
+		});
+	}
+
+	/** @param {HTMLElement} node */
+	function focusOnMount(node) {
+		node.focus();
+	}
+
+	/** @param {KeyboardEvent} e */
+	function handleRenameKey(e) {
+		if (e.key === 'Enter') submitRename();
+		if (e.key === 'Escape') cancelRename();
+	}
+
+	/** @param {MessageEvent} event */
+	function handleRenameResult(event) {
+		const message = event.data;
+		if (message?.command !== 'rename-function-result') return;
+		if (message.success) {
+			renameState = 'success';
+			setTimeout(() => {
+				selectedNode = null;
+				renameState = 'idle';
+			}, 1500);
+		} else {
+			renameState = 'error';
+			renameError = message.error ?? 'Error desconocido';
+		}
+	}
+
 	// Derived: breadcrumb items
 	$: breadcrumb = navigationStack.map((id) => ({
 		id,
@@ -51,6 +121,7 @@
 			navigationStack = [rootId];
 			renderLevel(rootId);
 		}
+		window.addEventListener('message', handleRenameResult);
 		_mountedCache = graphCache;
 	});
 
@@ -63,6 +134,7 @@
 
 	onDestroy(() => {
 		cy?.destroy();
+		window.removeEventListener('message', handleRenameResult);
 	});
 
 	// ── Navigation helpers ───────────────────────────────────────────────────────
@@ -685,9 +757,131 @@
 						</div>
 					{/if}
 				{/if}
+
+				{#if selectedNode.type === 'function' || selectedNode.type === 'method'}
+					<div class="rename-section">
+						{#if renameState === 'idle'}
+							<button class="rename-btn" on:click={startRename}>Renombrar</button>
+						{:else if renameState === 'editing'}
+							<input
+								class="rename-input"
+								type="text"
+								bind:value={renameValue}
+								on:keydown={handleRenameKey}
+								use:focusOnMount
+							/>
+							<div class="rename-actions">
+								<button class="rename-confirm" on:click={submitRename}>✓ Confirmar</button>
+								<button class="rename-cancel" on:click={cancelRename}>✕ Cancelar</button>
+							</div>
+						{:else if renameState === 'loading'}
+							<p class="rename-status loading">Aplicando renombre…</p>
+						{:else if renameState === 'success'}
+							<p class="rename-status success">✓ Renombrado correctamente</p>
+						{:else if renameState === 'error'}
+							<p class="rename-status error">{renameError}</p>
+							<button class="rename-btn" on:click={startRename}>Reintentar</button>
+						{/if}
+					</div>
+				{/if}
 			</aside>
 		{/if}
 	</div>
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
+<style>
+	.rename-section {
+		margin-top: 12px;
+		padding-top: 12px;
+		border-top: 1px solid #2a2a2a;
+	}
+
+	.rename-btn {
+		width: 100%;
+		padding: 6px 10px;
+		background: #1a3a30;
+		color: #4ec9b0;
+		border: 1px solid #4ec9b0;
+		border-radius: 4px;
+		font-family: 'Consolas', 'Menlo', monospace;
+		font-size: 12px;
+		cursor: pointer;
+		transition: background 0.15s;
+	}
+	.rename-btn:hover {
+		background: #1f4a3c;
+	}
+
+	.rename-input {
+		width: 100%;
+		box-sizing: border-box;
+		padding: 5px 8px;
+		background: #1e1e1e;
+		color: #d4d4d4;
+		border: 1px solid #4ec9b0;
+		border-radius: 4px;
+		font-family: 'Consolas', 'Menlo', monospace;
+		font-size: 13px;
+		outline: none;
+		margin-bottom: 6px;
+	}
+	.rename-input:focus {
+		border-color: #7ee8d4;
+	}
+
+	.rename-actions {
+		display: flex;
+		gap: 6px;
+	}
+
+	.rename-confirm {
+		flex: 1;
+		padding: 5px 8px;
+		background: #1a3a30;
+		color: #4ec9b0;
+		border: 1px solid #4ec9b0;
+		border-radius: 4px;
+		font-size: 12px;
+		cursor: pointer;
+	}
+	.rename-confirm:hover {
+		background: #1f4a3c;
+	}
+
+	.rename-cancel {
+		flex: 1;
+		padding: 5px 8px;
+		background: #2a1a1a;
+		color: #888;
+		border: 1px solid #444;
+		border-radius: 4px;
+		font-size: 12px;
+		cursor: pointer;
+	}
+	.rename-cancel:hover {
+		background: #3a2020;
+		color: #aaa;
+	}
+
+	.rename-status {
+		margin: 0;
+		padding: 6px 8px;
+		border-radius: 4px;
+		font-size: 12px;
+		font-family: 'Consolas', 'Menlo', monospace;
+	}
+	.rename-status.loading {
+		color: #888;
+		background: #1e1e1e;
+	}
+	.rename-status.success {
+		color: #4ec9b0;
+		background: #0d2b25;
+	}
+	.rename-status.error {
+		color: #f48771;
+		background: #2b0d0d;
+		margin-bottom: 6px;
+	}
+</style>
